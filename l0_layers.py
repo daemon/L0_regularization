@@ -6,8 +6,11 @@ from torch.nn.parameter import Parameter
 from torch.nn.modules.utils import _pair as pair
 from torch.autograd import Variable
 from torch.nn import init
+import torch.distributions as distributions
+
 
 limit_a, limit_b, epsilon = -.1, 1.1, 1e-6
+floatTensor = torch.FloatTensor if not torch.cuda.is_available() else torch.cuda.FloatTensor
 
 
 class L0Dense(Module):
@@ -35,10 +38,12 @@ class L0Dense(Module):
         self.lamba = lamba
         self.use_bias = False
         self.local_rep = local_rep
+        self.after = False
+        self.before = False
+        self.mask = None
         if bias:
             self.bias = Parameter(torch.Tensor(out_features))
             self.use_bias = True
-        self.floatTensor = torch.FloatTensor if not torch.cuda.is_available() else torch.cuda.FloatTensor
         self.reset_parameters()
         print(self)
 
@@ -89,35 +94,87 @@ class L0Dense(Module):
 
     def get_eps(self, size):
         """Uniform random numbers for the concrete distribution"""
-        eps = self.floatTensor(size).uniform_(epsilon, 1-epsilon)
+        eps = floatTensor(size).uniform_(epsilon, 1-epsilon)
         eps = Variable(eps)
         return eps
 
     def sample_z(self, batch_size, sample=True):
         """Sample the hard-concrete gates for training and use a deterministic value for testing"""
         if sample:
-            eps = self.get_eps(self.floatTensor(batch_size, self.in_features))
+            eps = self.get_eps(floatTensor(batch_size, self.in_features))
             z = self.quantile_concrete(eps)
             return F.hardtanh(z, min_val=0, max_val=1)
         else:  # mode
             pi = F.sigmoid(self.qz_loga).view(1, self.in_features).expand(batch_size, self.in_features)
             return F.hardtanh(pi * (limit_b - limit_a) + limit_a, min_val=0, max_val=1)
 
+    def sample_dist(self):
+        dist = distributions.bernoulli.Bernoulli(1 - self.cdf_qz(0))
+        return dist
+
     def sample_weights(self):
-        z = self.quantile_concrete(self.get_eps(self.floatTensor(self.in_features)))
+        z = self.quantile_concrete(self.get_eps(floatTensor(self.in_features)))
         mask = F.hardtanh(z, min_val=0, max_val=1)
         return mask.view(self.in_features, 1) * self.weights
 
+    def reset(self):
+        self.mask = None
+        self.mask_bias = None
+        self.mask_weights = None
+        self.after = False
+        self.before = False
+
+    def prune_mask(self, mask=None, reverse=False, conv=None):
+        before = not reverse
+        if mask is not None:
+            self.mask = mask
+            if before:
+                self.before = True
+                if self.after:
+                    self.mask_weights = self.mask_weights[self.mask]
+                else:
+                    self.mask_weights = self.weights[self.mask]
+                if self.use_bias:
+                    self.mask_bias = self.bias
+            else:
+                self.after = True
+                if self.before:
+                    self.mask_weights = self.mask_weights[:, self.mask]
+                    if self.use_bias:
+                        self.mask_bias = self.mask_bias[self.mask]
+                else:
+                    self.mask_weights = self.weights[:, self.mask]
+                    if self.use_bias:
+                        self.mask_bias = self.bias[self.mask]
+        elif conv is not None:
+            weights = self.mask_weights if self.after else self.weights
+            neuron_size = weights.size(0) // conv.size(0)
+            conv = conv.unsqueeze(-1).expand(-1, neuron_size).contiguous().view(-1)
+            self.mask_weights = weights[conv]
+            self.mask_bias = self.bias.data
+            self.mask = conv
+
+    def n_active(self):
+        pi = F.sigmoid(self.qz_loga)
+        pi = F.hardtanh(pi * (limit_b - limit_a) + limit_a, min_val=0, max_val=1)
+        return (pi != 0).long().sum()
+
     def forward(self, input):
         if self.local_rep or not self.training:
-            z = self.sample_z(input.size(0), sample=self.training)
-            xin = input.mul(z)
-            output = xin.mm(self.weights)
+            if self.mask is None:
+                z = self.sample_z(input.size(0), sample=self.training)
+                xin = input.mul(z)
+                output = xin.mm(self.weights)
+            else:
+                output = input.mm(self.mask_weights)
         else:
             weights = self.sample_weights()
             output = input.mm(weights)
         if self.use_bias:
-            output.add_(self.bias)
+            if self.mask is None:
+                output.add_(self.bias)
+            else:
+                output.add_(self.mask_bias)
         return output
 
     def __repr__(self):
@@ -166,13 +223,16 @@ class L0Conv2d(Module):
         self.lamba = lamba
         self.droprate_init = droprate_init if droprate_init != 0. else 0.5
         self.temperature = temperature
-        self.floatTensor = torch.FloatTensor if not torch.cuda.is_available() else torch.cuda.FloatTensor
         self.use_bias = False
         self.weights = Parameter(torch.Tensor(out_channels, in_channels // groups, *self.kernel_size))
         self.qz_loga = Parameter(torch.Tensor(out_channels))
         self.dim_z = out_channels
         self.input_shape = None
         self.local_rep = local_rep
+        self.mask = None
+        self.after = False
+        self.before = False
+        self.index_mask = None
 
         if bias:
             self.bias = Parameter(torch.Tensor(out_channels))
@@ -188,6 +248,47 @@ class L0Conv2d(Module):
 
         if self.use_bias:
             self.bias.data.fill_(0)
+
+    def n_active(self):
+        pi = F.sigmoid(self.qz_loga)
+        pi = F.hardtanh(pi * (limit_b - limit_a) + limit_a, min_val=0, max_val=1)
+        return (pi != 0).long().sum()
+
+    def sample_dist(self):
+        dist = distributions.bernoulli.Bernoulli(1 - self.cdf_qz(0))
+        return dist
+
+    def reset(self):
+        self.mask = None
+        self.mask_weights = None
+        self.mask_bias = None
+        self.after = False
+        self.before = False
+
+    def index_mask(self, mask):
+        self.index_mask = mask
+
+    def prune_mask(self, mask, reverse=False):
+        self.mask = mask
+        before = reverse
+        if before:
+            if self.after:
+                self.mask_weights = self.mask_weights[:, self.mask]
+            else:
+                self.mask_weights = self.weights[:, self.mask]
+                if self.use_bias:
+                    self.mask_bias = self.bias.data
+            self.before = True
+        else:
+            if self.before:
+                self.mask_weights = self.mask_weights[self.mask]
+                if self.use_bias:
+                    self.mask_bias = self.mask_bias[self.mask]
+            else:
+                self.mask_weights = self.weights[self.mask]
+                if self.use_bias:
+                    self.mask_bias = self.bias[self.mask]
+            self.after = True
 
     def constrain_parameters(self, **kwargs):
         self.qz_loga.data.clamp_(min=math.log(1e-2), max=math.log(1e2))
@@ -237,14 +338,14 @@ class L0Conv2d(Module):
 
     def get_eps(self, size):
         """Uniform random numbers for the concrete distribution"""
-        eps = self.floatTensor(size).uniform_(epsilon, 1-epsilon)
+        eps = floatTensor(size).uniform_(epsilon, 1-epsilon)
         eps = Variable(eps)
         return eps
 
     def sample_z(self, batch_size, sample=True):
         """Sample the hard-concrete gates for training and use a deterministic value for testing"""
         if sample:
-            eps = self.get_eps(self.floatTensor(batch_size, self.dim_z))
+            eps = self.get_eps(floatTensor(batch_size, self.dim_z))
             z = self.quantile_concrete(eps).view(batch_size, self.dim_z, 1, 1)
             return F.hardtanh(z, min_val=0, max_val=1)
         else:  # mode
@@ -252,7 +353,7 @@ class L0Conv2d(Module):
             return F.hardtanh(pi * (limit_b - limit_a) + limit_a, min_val=0, max_val=1)
 
     def sample_weights(self):
-        z = self.quantile_concrete(self.get_eps(self.floatTensor(self.dim_z))).view(self.dim_z, 1, 1, 1)
+        z = self.quantile_concrete(self.get_eps(floatTensor(self.dim_z))).view(self.dim_z, 1, 1, 1)
         return F.hardtanh(z, min_val=0, max_val=1) * self.weights
 
     def forward(self, input_):
@@ -260,9 +361,13 @@ class L0Conv2d(Module):
             self.input_shape = input_.size()
         b = None if not self.use_bias else self.bias
         if self.local_rep or not self.training:
-            output = F.conv2d(input_, self.weights, b, self.stride, self.padding, self.dilation, self.groups)
-            z = self.sample_z(output.size(0), sample=self.training)
-            return output.mul(z)
+            if self.mask is None:
+                output = F.conv2d(input_, self.weights, b, self.stride, self.padding, self.dilation, self.groups)
+                z = self.sample_z(output.size(0), sample=self.training)
+                return output.mul(z)
+            else:
+                output = F.conv2d(input_, self.mask_weights, self.mask_bias, self.stride, self.padding, self.dilation, self.groups)
+                return output
         else:
             weights = self.sample_weights()
             output = F.conv2d(input_, weights, None, self.stride, self.padding, self.dilation, self.groups)

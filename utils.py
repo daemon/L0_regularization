@@ -73,8 +73,8 @@ def log_sum_exp(vec):
 
 def get_flat_fts(in_size, fts):
     dummy_input = torch.ones(1, *in_size)
-    if torch.cuda.is_available():
-        dummy_input = dummy_input.cuda()
+    # if torch.cuda.is_available():
+    #     dummy_input = dummy_input.cuda()
     f = fts(torch.autograd.Variable(dummy_input))
     print('conv_out_size: {}'.format(f.size()))
     return int(np.prod(f.size()[1:]))

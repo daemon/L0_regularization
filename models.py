@@ -2,9 +2,13 @@ import torch
 import torch.nn as nn
 from l0_layers import L0Conv2d, L0Dense
 from base_layers import MAPConv2d, MAPDense
-from utils import get_flat_fts
 from copy import deepcopy
 import torch.nn.functional as F
+
+
+
+def find_l0_modules(net):
+    return list(filter(lambda x: isinstance(x, L0Conv2d) or isinstance(x, L0Dense), net.modules()))
 
 
 class L0MLP(nn.Module):
@@ -48,8 +52,6 @@ class L0MLP(nn.Module):
         regularization = 0.
         for layer in self.layers:
             regularization += - (1. / self.N) * layer.regularization()
-        if torch.cuda.is_available():
-            regularization = regularization.cuda()
         return regularization
 
     def get_exp_flops_l0(self):
@@ -97,14 +99,9 @@ class L0LeNet5(nn.Module):
                           weight_decay=self.weight_decay, lamba=lambas[1], local_rep=local_rep),
                  nn.ReLU(), nn.MaxPool2d(2)]
         self.convs = nn.Sequential(*convs)
-        if torch.cuda.is_available():
-            self.convs = self.convs.cuda()
-
-        flat_fts = get_flat_fts(input_size, self.convs)
-        fcs = [L0Dense(flat_fts, self.fc_dims, droprate_init=0.5, weight_decay=self.weight_decay,
+        fcs = [L0Dense(800, self.fc_dims, droprate_init=0.5, weight_decay=self.weight_decay,
                        lamba=lambas[2], local_rep=local_rep, temperature=temperature), nn.ReLU(),
-               L0Dense(self.fc_dims, num_classes, droprate_init=0.5, weight_decay=self.weight_decay,
-                       lamba=lambas[3], local_rep=local_rep, temperature=temperature)]
+               nn.Linear(self.fc_dims, num_classes)]
         self.fcs = nn.Sequential(*fcs)
 
         self.layers = []
@@ -128,8 +125,6 @@ class L0LeNet5(nn.Module):
         regularization = 0.
         for layer in self.layers:
             regularization += - (1. / self.N) * layer.regularization()
-        if torch.cuda.is_available():
-            regularization = regularization.cuda()
         return regularization
 
     def get_exp_flops_l0(self):
@@ -274,6 +269,7 @@ class L0WideResNet(nn.Module):
                 regularization += (self.weight_decay / self.N) * .5 * torch.sum(bnw.pow(2))
         if torch.cuda.is_available():
             regularization = regularization.cuda()
+
         return regularization
 
     def get_exp_flops_l0(self):
