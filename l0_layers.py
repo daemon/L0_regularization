@@ -1,5 +1,7 @@
+from functools import lru_cache
 import torch
 import math
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.modules import Module
 from torch.nn.parameter import Parameter
@@ -11,6 +13,59 @@ import torch.distributions as distributions
 
 limit_a, limit_b, epsilon = -.1, 1.1, 1e-6
 floatTensor = torch.FloatTensor if not torch.cuda.is_available() else torch.cuda.FloatTensor
+
+
+def config_filename(height, width, kernel_size, padding, stride, cuda):
+    str_ = f"{height}-{width}-{kernel_size}-{padding}-{stride}-{cuda}.dat"
+    return str_
+
+class LatencyTable(nn.Module):
+
+    def __init__(self, filename, bias=-1, multiplier=10):
+        super().__init__()
+        with open(filename) as f:
+            lines = f.readlines()
+        data = []
+        for line in lines:
+            i, j, lat = line.split(",")
+            i = (int(i) + bias) // multiplier
+            j = (int(j) + bias) // multiplier
+            lat = float(lat)
+            data.append((i, j, lat))
+        self.bias = bias
+        self.multiplier = multiplier
+        row_size, col_size = i + 1, j + 1
+        self.register_buffer("table", torch.empty(row_size, col_size))
+        for i, j, lat in data:
+            self.table[i, j] = lat
+
+    @classmethod
+    @lru_cache(maxsize=10000)
+    def find(cls, height, width, conv, bias=-1, multiplier=10, cuda=False):
+        cfg_filename = config_filename(height, width, conv.kernel_size[0], conv.padding[0], conv.stride[0], cuda)
+        lat_table = cls(cfg_filename, bias=bias, multiplier=multiplier).to(conv.weights.device)
+        # print(lat_table.table[:2, :2].cpu().numpy())
+        # print(lat_table(torch.cuda.FloatTensor([10.9999]), torch.cuda.FloatTensor([10.9999])).cpu().numpy())
+        # print(lat_table(torch.cuda.FloatTensor([1]), torch.cuda.FloatTensor([1])).cpu().numpy())
+        # print("=" * 100)
+        return lat_table
+
+    def forward(self, i, j):
+        i = ((i + self.bias).float() / self.multiplier)
+        j = ((j + self.bias).float() / self.multiplier)
+        i_f = i.floor().long()
+        j_f = j.floor().long()
+        i_c = (i + 1E-6).ceil().long()
+        j_c = (j + 1E-6).ceil().long()
+        i_df = (i - i_f.float()).abs_()
+        j_df = (j - j_f.float()).abs_()
+        i_dc = (i - i_c.float()).abs_()
+        j_dc = (j - j_c.float()).abs_()
+        o = self.table[i_f, j_f]
+        r = self.table[i_c, j_f]
+        t = self.table[i_f, j_c]
+        rt = self.table[i_c, j_c]
+        return j_dc * (i_dc * o + i_df * r) + j_df * (i_dc * t + i_df * rt)
 
 
 class L0Dense(Module):
@@ -190,7 +245,7 @@ class L0Dense(Module):
 class L0Conv2d(Module):
     """Implementation of L0 regularization for the feature maps of a convolutional layer"""
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=True,
-                 droprate_init=0.5, temperature=2./3., weight_decay=1., lamba=1., local_rep=False, **kwargs):
+                 droprate_init=0.5, temperature=2./3., weight_decay=1., lamba=1., local_rep=False, load_lat_table=True, **kwargs):
         """
         :param in_channels: Number of input channels
         :param out_channels: Number of output channels
@@ -230,6 +285,7 @@ class L0Conv2d(Module):
         self.input_shape = None
         self.local_rep = local_rep
         self.mask = None
+        self.load_lat_table = load_lat_table
         self.after = False
         self.before = False
         self.index_mask = None
@@ -359,6 +415,9 @@ class L0Conv2d(Module):
     def forward(self, input_):
         if self.input_shape is None:
             self.input_shape = input_.size()
+        if self.load_lat_table:
+            self.lat_table = LatencyTable.find(input_.size(-2), input_.size(-1), self)
+            self.load_lat_table = False
         b = None if not self.use_bias else self.bias
         if self.local_rep or not self.training:
             if self.mask is None:
@@ -376,7 +435,7 @@ class L0Conv2d(Module):
     def __repr__(self):
         s = ('{name}({in_channels}, {out_channels}, kernel_size={kernel_size}, stride={stride}, '
              'droprate_init={droprate_init}, temperature={temperature}, prior_prec={prior_prec}, '
-             'lamba={lamba}, local_rep={local_rep}')
+             'lamba={lamba}, local_rep={local_rep}, load_lat_table={load_lat_table}')
         if self.padding != (0,) * len(self.padding):
             s += ', padding={padding}'
         if self.dilation != (1,) * len(self.dilation):

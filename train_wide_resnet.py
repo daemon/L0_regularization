@@ -8,7 +8,8 @@ import torch.nn as nn
 
 import torch.backends.cudnn as cudnn
 
-from models import L0WideResNet
+import l0_layers
+from models import L0WideResNet, find_l0_modules
 from dataloaders import cifar10, cifar100
 from utils import save_checkpoint, AverageMeter, accuracy
 from torch.optim import lr_scheduler
@@ -26,12 +27,13 @@ parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
 parser.add_argument('--momentum', default=0.9, type=float, help='momentum')
 parser.add_argument('--weight-decay', '--wd', default=0.0005, type=float,
                     help='weight decay (default: 5e-4)')
-parser.add_argument('--print-freq', '-p', default=100, type=int,
-                    help='print frequency (default: 100)')
+parser.add_argument('--print-freq', '-p', default=20, type=int,
+                    help='print frequency (default: 20)')
 parser.add_argument('--depth', default=28, type=int,
                     help='total depth of the network (default: 28)')
 parser.add_argument('--width', default=10, type=int,
                     help='total width of the network (default: 10)')
+parser.add_argument("--lat_lambda", default=1E3, type=float)
 parser.add_argument('--droprate_init', default=0.3, type=float,
                     help='dropout probability (default: 0.3)')
 parser.add_argument('--no-augment', dest='augment', action='store_false',
@@ -63,6 +65,22 @@ time_acc = [(0, 0, 0)]
 total_steps = 0
 exp_flops, exp_l0 = [], []
 
+
+def gather_latencies(net):
+    l0_modules = find_l0_modules(net)
+    samples = []
+    last_sample = torch.Tensor([3]).cuda()
+    measurements = torch.zeros(1000).cuda()
+    lp = torch.zeros(1000).cuda()
+    for mod in l0_modules:
+        table = mod.lat_table
+        sd = mod.sample_dist()
+        mask = sd.sample_n(1000)
+        idx = mask.sum(1).long()
+        measurements += table(last_sample, idx)
+        last_sample = idx
+        lp += sd.log_prob(mask).sum(1)
+    return (lp * measurements).mean()
 
 def main():
     global args, best_prec1, writer, time_acc, total_steps, exp_flops, exp_l0
@@ -142,7 +160,14 @@ def main():
     def loss_function(output, target_var, model):
         loss = loglike(output, target_var)
         reg = model.regularization() if not args.multi_gpu else model.module.regularization()
-        total_loss = loss + reg
+        if args.lat_lambda:
+            lat_loss = args.lat_lambda * gather_latencies(model)
+        else:
+            lat_loss = 0
+        # print(lat_loss.item(), reg.item())
+        # print(reg.item())
+        # lat_loss = 0
+        total_loss = loss + lat_loss # + reg
         if torch.cuda.is_available():
             total_loss = total_loss.cuda()
         return total_loss
@@ -255,13 +280,15 @@ def train(train_loader, model, criterion, optimizer, lr_schedule, epoch):
 
         # input()
         if i % args.print_freq == 0:
+            config = [str(m.n_active().long().item()) for m in find_l0_modules(model)]
+            arch = "-".join(config)
             print(' Epoch: [{0}][{1}/{2}]\t'
                   'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                   'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
                   'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                  'Err@1 {top1.val:.3f} ({top1.avg:.3f})'.format(
+                  'Err@1 {top1.val:.3f} ({top1.avg:.3f}) {arch}'.format(
                 epoch, i, len(train_loader), batch_time=batch_time,
-                data_time=data_time, loss=losses, top1=top1))
+                data_time=data_time, loss=losses, top1=top1, arch=arch))
 
     # log to TensorBoard
     if writer is not None:
