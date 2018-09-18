@@ -167,7 +167,7 @@ def main():
         # print(lat_loss.item(), reg.item())
         # print(reg.item())
         # lat_loss = 0
-        total_loss = loss + lat_loss # + reg
+        total_loss = loss + lat_loss + reg
         if torch.cuda.is_available():
             total_loss = total_loss.cuda()
         return total_loss
