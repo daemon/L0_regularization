@@ -101,7 +101,8 @@ class L0LeNet5(nn.Module):
         self.convs = nn.Sequential(*convs)
         fcs = [L0Dense(800, self.fc_dims, droprate_init=0.5, weight_decay=self.weight_decay,
                        lamba=lambas[2], local_rep=local_rep, temperature=temperature), nn.ReLU(),
-               nn.Linear(self.fc_dims, num_classes)]
+               L0Dense(self.fc_dims, num_classes, droprate_init=0.5, weight_decay=self.weight_decay,
+                       lamba=lambas[3], local_rep=local_rep, temperature=temperature)]
         self.fcs = nn.Sequential(*fcs)
 
         self.layers = []

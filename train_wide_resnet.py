@@ -236,8 +236,8 @@ def train(train_loader, model, criterion, optimizer, lr_schedule, epoch):
 
         e_fl, e_l0 = model.get_exp_flops_l0() if not args.multi_gpu else \
             model.module.get_exp_flops_l0()
-        exp_flops.append(e_fl)
-        exp_l0.append(e_l0)
+        # exp_flops.append(e_fl)
+        # exp_l0.append(e_l0)
         if writer is not None:
             writer.add_scalar('stats_comp/exp_flops', e_fl, total_steps)
             writer.add_scalar('stats_comp/exp_l0', e_l0, total_steps)

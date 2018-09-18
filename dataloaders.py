@@ -53,7 +53,7 @@ def cifar10(augment=True, batch_size=128):
         batch_size=batch_size, shuffle=True, **kwargs)
     val_loader = torch.utils.data.DataLoader(
         datasets.CIFAR10('../data', train=False, transform=transform_test),
-        batch_size=batch_size, shuffle=True, **kwargs)
+        batch_size=32, shuffle=True, **kwargs)
     num_classes = 10
 
     return train_loader, val_loader, num_classes
@@ -90,7 +90,7 @@ def cifar100(augment=True, batch_size=128):
         batch_size=batch_size, shuffle=True, **kwargs)
     val_loader = torch.utils.data.DataLoader(
         datasets.CIFAR100('../data', train=False, transform=transform_test),
-        batch_size=batch_size, shuffle=True, **kwargs)
+        batch_size=32, shuffle=True, **kwargs)
     num_classes = 100
 
     return train_loader, val_loader, num_classes

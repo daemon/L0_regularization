@@ -73,22 +73,22 @@ def gather_latencies(net, inp_size=(1, 1, 28, 28)):
     # l0_layers.floatTensor = torch.FloatTensor
     l0_modules = find_l0_modules(net)
     # inp = torch.empty(inp_size).zero_()
-    conv1, conv2, dnn = l0_modules
+    conv1, conv2, dnn1, dnn2 = l0_modules
     lp = []
     # for _ in range(10):
     #     net(inp)
     measurements = []
     sd1 = conv1.sample_dist()
     sd2 = conv2.sample_dist()
-    sd3 = dnn.sample_dist()
+    sd3 = dnn2.sample_dist()
     m1 = sd1.sample_n(1000)
     m2 = sd2.sample_n(1000)
-    # m3 = sd3.sample_n(1000)
+    m3 = sd3.sample_n(1000)
     idx1 = m1.sum(1).long().clamp(max=19)
     idx2 = m2.sum(1).long().clamp(max=49)
-    # idx3 = m3.sum(1).long().clamp(max=499)
-    measurements = conv_table[0, idx1] + conv_table2[idx1, idx2] + lin_table[idx2 * 16, 499]
-    lp = sd1.log_prob(m1).sum(1) + sd2.log_prob(m2).sum(1) # + sd3.log_prob(m3).sum(1)
+    idx3 = m3.sum(1).long().clamp(max=499)
+    measurements = conv_table[0, idx1] + conv_table2[idx1, idx2] + lin_table[idx2 * 16, 499] + lin_table[idx3, 10]
+    lp = sd1.log_prob(m1).sum(1) + sd2.log_prob(m2).sum(1) + sd3.log_prob(m3).sum(1)
 
     # sd3 = dnn.sample_dist()
     # m3 = sd3.sample_n()
@@ -243,7 +243,7 @@ def train(train_loader, model, criterion, optimizer, epoch):
 
         e_fl, e_l0 = model.get_exp_flops_l0() if not args.multi_gpu else \
             model.module.get_exp_flops_l0()
-        # exp_flops.append(e_fl)
+        exp_flops.append(e_fl) 
         # exp_l0.append(e_l0)
         if writer is not None:
             writer.add_scalar('stats_comp/exp_flops', e_fl, total_steps)
@@ -262,14 +262,15 @@ def train(train_loader, model, criterion, optimizer, epoch):
 
         # input()
         if i % args.print_freq == 0:
-            conv1, conv2, dnn = find_l0_modules(model)
+            conv1, conv2, dnn, dnn2 = find_l0_modules(model)
             print(' Epoch: [{0}][{1}/{2}]\t'
                   'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                   'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
                   'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                  'Err@1 {top1.val:.3f} ({top1.avg:.3f}) {n1}-{n2}-{n3}'.format(
+                  'Err@1 {top1.val:.3f} ({top1.avg:.3f}) {n1}-{n2}-{n3}-{n4}'.format(
                 epoch, i, len(train_loader), batch_time=batch_time,
-                data_time=data_time, loss=losses, top1=top1, n1=conv1.n_active(), n2=conv2.n_active(), n3=dnn.n_active()))
+                data_time=data_time, loss=losses, top1=top1, n1=conv1.n_active(), n2=conv2.n_active(),
+                n3=dnn.n_active(), n4=dnn2.n_active()))
 
     # log to TensorBoard
     if writer is not None:
