@@ -165,9 +165,10 @@ class BasicBlock(nn.Module):
 
         self.bn2 = nn.BatchNorm2d(out_planes)
         self.tie_all_weights = tie_all_weights
+        droprate_reduced = 0.1
         if tie_all_weights:
             self.conv2 = L0Conv2d(out_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False,
-                weight_decay=weight_decay, droprate_init=0, local_rep=local_rep, temperature=temperature, lamba=lamba)
+                weight_decay=weight_decay / (1 - droprate_reduced), droprate_init=droprate_reduced, local_rep=local_rep, temperature=temperature, lamba=lamba)
         else:
             self.conv2 = MAPConv2d(out_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False,
                                    weight_decay=weight_decay)
@@ -176,7 +177,7 @@ class BasicBlock(nn.Module):
         if tie_all_weights:
             self.convShortcut = (not self.equalInOut) and \
                                 L0Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, padding=0, bias=False,
-                                          weight_decay=weight_decay, droprate_init=0, local_rep=local_rep, 
+                                          weight_decay=weight_decay / (1 - droprate_reduced), droprate_init=droprate_reduced, local_rep=local_rep, 
                                           temperature=temperature, lamba=lamba) or None
         else:
             self.convShortcut = (not self.equalInOut) and \
