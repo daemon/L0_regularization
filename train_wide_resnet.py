@@ -103,7 +103,7 @@ def gather_latencies(net, tie_all_weights=False, n_samples=1000):
                 mask = sd1.sample_n(n_samples)
                 s1 = mask.sum(1).long()
                 lp += sd1.log_prob(mask).sum(1)
-                measurements += layer.conv1.lat_table(torch.cuda.LongTensor([layer.conv1.in_channels - 1]), s1)
+                measurements += layer.conv1.lat_table(torch.cuda.LongTensor([layer.conv1.in_channels]), s1)
                 measurements += layer.conv2.lat_table(s1, torch.cuda.LongTensor([layer.conv2.out_channels]))
     return (lp * measurements).mean()
 
