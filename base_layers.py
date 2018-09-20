@@ -5,6 +5,7 @@ from torch.nn.parameter import Parameter
 from torch.nn.modules.utils import _pair as pair
 from torch.nn import init
 
+from l0_layers import LatencyTable
 
 class MAPDense(Module):
 
@@ -78,6 +79,7 @@ class MAPConv2d(Module):
         self.padding = pair(padding)
         self.dilation = pair(dilation)
         self.output_padding = pair(0)
+        self.load_lat_table = True
         self.groups = groups
         self.weight = Parameter(torch.Tensor(out_channels, in_channels // groups, *self.kernel_size))
         if bias:
@@ -130,6 +132,13 @@ class MAPConv2d(Module):
     def forward(self, input_):
         if self.input_shape is None:
             self.input_shape = input_.size()
+        if self.load_lat_table:
+            # print(self.in_channels, self.out_channels, self.kernel_size, input_.size(-2), input_.size(-1), self.stride, self.padding)
+            try:
+                self.lat_table = LatencyTable.find(input_.size(-2), input_.size(-1), self, device=input_.device)
+            except FileNotFoundError:
+                pass
+            self.load_lat_table = False
         output = F.conv2d(input_, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
         return output
 

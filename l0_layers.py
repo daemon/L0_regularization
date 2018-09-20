@@ -38,17 +38,23 @@ class LatencyTable(nn.Module):
         self.register_buffer("table", torch.empty(row_size, col_size))
         for i, j, lat in data:
             self.table[i, j] = lat
+        self.filename = filename
 
     @classmethod
     @lru_cache(maxsize=10000)
-    def find(cls, height, width, conv, bias=-1, multiplier=10, cuda=False):
+    def find(cls, height, width, conv, bias=-1, multiplier=10, cuda=False, device=None):
         cfg_filename = config_filename(height, width, conv.kernel_size[0], conv.padding[0], conv.stride[0], cuda)
-        lat_table = cls(cfg_filename, bias=bias, multiplier=multiplier).to(conv.weights.device)
+        lat_table = cls(cfg_filename, bias=bias, multiplier=multiplier)
+        if device is not None:
+            lat_table = lat_table.to(device)
         # print(lat_table.table[:2, :2].cpu().numpy())
         # print(lat_table(torch.cuda.FloatTensor([10.9999]), torch.cuda.FloatTensor([10.9999])).cpu().numpy())
         # print(lat_table(torch.cuda.FloatTensor([1]), torch.cuda.FloatTensor([1])).cpu().numpy())
         # print("=" * 100)
         return lat_table
+
+    def __str__(self):
+        return self.filename
 
     def forward(self, i, j):
         i = ((i + self.bias).float() / self.multiplier)
@@ -360,6 +366,9 @@ class L0Conv2d(Module):
         y = F.sigmoid((torch.log(x) - torch.log(1 - x) + self.qz_loga) / self.temperature)
         return y * (limit_b - limit_a) + limit_a
 
+    def tie_gates(self, l0_layer):
+        self.qz_loga = l0_layer.qz_loga
+
     def _reg_w(self):
         """Expected L0 norm under the stochastic gates, takes into account and re-weights also a potential L2 penalty"""
         q0 = self.cdf_qz(0)
@@ -416,7 +425,8 @@ class L0Conv2d(Module):
         if self.input_shape is None:
             self.input_shape = input_.size()
         if self.load_lat_table:
-            self.lat_table = LatencyTable.find(input_.size(-2), input_.size(-1), self)
+            # print(self.in_channels, self.out_channels, self.kernel_size, input_.size(-2), input_.size(-1), self.stride, self.padding)
+            self.lat_table = LatencyTable.find(input_.size(-2), input_.size(-1), self, device=self.weights.device)
             self.load_lat_table = False
         b = None if not self.use_bias else self.bias
         if self.local_rep or not self.training:

@@ -49,6 +49,7 @@ parser.add_argument('--no-tensorboard', dest='tensorboard', action='store_false'
 parser.add_argument('--multi_gpu', action='store_true')
 parser.add_argument('--lamba', type=float, default=0.001,
                     help='Coefficient for the L0 term.')
+parser.add_argument("--tie_all_weights", action="store_true")
 parser.add_argument('--beta_ema', type=float, default=0.99)
 parser.add_argument('--lr_decay_ratio', type=float, default=0.2)
 parser.add_argument('--dataset', choices=['c10', 'c100'], default='c10')
@@ -66,20 +67,44 @@ total_steps = 0
 exp_flops, exp_l0 = [], []
 
 
-def gather_latencies(net):
+def gather_latencies(net, tie_all_weights=False, n_samples=1000):
     l0_modules = find_l0_modules(net)
     samples = []
-    last_sample = torch.Tensor([3]).cuda()
-    measurements = torch.zeros(1000).cuda()
-    lp = torch.zeros(1000).cuda()
-    for mod in l0_modules:
-        table = mod.lat_table
-        sd = mod.sample_dist()
-        mask = sd.sample_n(1000)
-        idx = mask.sum(1).long()
-        measurements += table(last_sample, idx)
-        last_sample = idx
-        lp += sd.log_prob(mask).sum(1)
+    last_sample = torch.Tensor([160]).cuda()
+    measurements = torch.zeros(n_samples).cuda()
+    lp = torch.zeros(n_samples).cuda()
+    for block in (net.block1, net.block2, net.block3):
+        if tie_all_weights:
+            for layer in block.layers:
+                if not layer.equalInOut:
+                    sd1 = layer.conv1.sample_dist()
+                    mask = sd1.sample_n(n_samples)
+                    s1 = mask.sum(1).long()
+                    lp += sd1.log_prob(mask).sum(1)
+
+                    sd2 = layer.conv2.sample_dist()
+                    mask = sd2.sample_n(n_samples)
+                    s2 = mask.sum(1).long()
+                    lp += sd2.log_prob(mask).sum(1)
+                    measurements += layer.conv1.lat_table(last_sample, s1)
+                    measurements += layer.conv2.lat_table(s1, s2)
+                    measurements += layer.convShortcut.lat_table(last_sample, s2)
+                    last_sample = s2
+                else:
+                    sd1 = layer.conv1.sample_dist()
+                    mask = sd1.sample_n(n_samples)
+                    s1 = mask.sum(1).long()
+                    lp += sd1.log_prob(mask).sum(1)
+                    measurements += layer.conv1.lat_table(last_sample, s1)
+                    measurements += layer.conv2.lat_table(s1, last_sample)
+        else:
+            for layer in block.layers:
+                sd1 = layer.conv1.sample_dist()
+                mask = sd1.sample_n(n_samples)
+                s1 = mask.sum(1).long()
+                lp += sd1.log_prob(mask).sum(1)
+                measurements += layer.conv1.lat_table(torch.cuda.LongTensor([layer.conv1.in_channels - 1]), s1)
+                measurements += layer.conv2.lat_table(s1, torch.cuda.LongTensor([layer.conv2.out_channels]))
     return (lp * measurements).mean()
 
 def main():
@@ -108,7 +133,7 @@ def main():
     # create model
     model = L0WideResNet(args.depth, num_classes, widen_factor=args.width, droprate_init=args.droprate_init,
                          N=50000, beta_ema=args.beta_ema, weight_decay=args.weight_decay, local_rep=args.local_rep,
-                         lamba=args.lamba, temperature=args.temp)
+                         lamba=args.lamba, temperature=args.temp, tie_all_weights=args.tie_all_weights)
 
     print('Number of model parameters: {}'.format(sum([p.data.nelement() for p in model.parameters()])))
     
@@ -161,7 +186,7 @@ def main():
         loss = loglike(output, target_var)
         reg = model.regularization() if not args.multi_gpu else model.module.regularization()
         if args.lat_lambda:
-            lat_loss = args.lat_lambda * gather_latencies(model)
+            lat_loss = args.lat_lambda * gather_latencies(model, args.tie_all_weights)
         else:
             lat_loss = 0
         # print(lat_loss.item(), reg.item())

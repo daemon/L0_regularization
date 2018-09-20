@@ -156,7 +156,7 @@ class L0LeNet5(nn.Module):
 
 class BasicBlock(nn.Module):
     def __init__(self, in_planes, out_planes, stride, droprate_init=0.0, weight_decay=0., lamba=0.01, local_rep=False,
-                 temperature=2./3.):
+                 temperature=2./3., tie_all_weights=False):
         super(BasicBlock, self).__init__()
         self.bn1 = nn.BatchNorm2d(in_planes)
         self.conv1 = L0Conv2d(in_planes, out_planes, kernel_size=3, stride=1, padding=1, bias=False,
@@ -164,13 +164,24 @@ class BasicBlock(nn.Module):
                               lamba=lamba, temperature=temperature)
 
         self.bn2 = nn.BatchNorm2d(out_planes)
-        self.conv2 = MAPConv2d(out_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False,
-                               weight_decay=weight_decay)
+        self.tie_all_weights = tie_all_weights
+        if tie_all_weights:
+            self.conv2 = L0Conv2d(out_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False,
+                weight_decay=weight_decay / (1 - 0.3), droprate_init=droprate_init, local_rep=local_rep, temperature=temperature, lamba=lamba)
+        else:
+            self.conv2 = MAPConv2d(out_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False,
+                                   weight_decay=weight_decay)
 
         self.equalInOut = (in_planes == out_planes)
-        self.convShortcut = (not self.equalInOut) and \
-                            MAPConv2d(in_planes, out_planes, kernel_size=1, stride=stride, padding=0, bias=False,
-                                      weight_decay=weight_decay) or None
+        if tie_all_weights:
+            self.convShortcut = (not self.equalInOut) and \
+                                L0Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, padding=0, bias=False,
+                                          weight_decay=weight_decay / (1 - 0.3), droprate_init=droprate_init, local_rep=local_rep, 
+                                          temperature=temperature, lamba=lamba) or None
+        else:
+            self.convShortcut = (not self.equalInOut) and \
+                                MAPConv2d(in_planes, out_planes, kernel_size=1, stride=stride, padding=0, bias=False,
+                                          weight_decay=weight_decay) or None
 
     def forward(self, x):
         if not self.equalInOut:
@@ -185,19 +196,31 @@ class BasicBlock(nn.Module):
 
 class NetworkBlock(nn.Module):
     def __init__(self, nb_layers, in_planes, out_planes, block, stride, droprate_init=0.0, weight_decay=0., lamba=0.01,
-                 local_rep=False, temperature=2./3.):
+                 local_rep=False, temperature=2./3., tie_all_weights=False):
         super(NetworkBlock, self).__init__()
+        self.tie_all_weights = tie_all_weights
         self.layer = self._make_layer(block, in_planes, out_planes, nb_layers, stride, droprate_init,
                                       weight_decay=weight_decay, lamba=lamba, local_rep=local_rep,
-                                      temperature=temperature)
+                                      temperature=temperature, tie_all_weights=tie_all_weights)
 
     def _make_layer(self, block, in_planes, out_planes, nb_layers, stride, droprate_init,
-                    weight_decay=0., lamba=0.01, local_rep=False, temperature=2./3.):
+                    weight_decay=0., lamba=0.01, local_rep=False, temperature=2./3., tie_all_weights=False):
         layers = []
         for i in range(nb_layers):
             layers.append(block(i == 0 and in_planes or out_planes, out_planes, i == 0 and stride or 1,
-                                droprate_init, weight_decay, lamba, local_rep=local_rep, temperature=temperature))
+                                droprate_init, weight_decay, lamba, local_rep=local_rep, temperature=temperature,
+                                tie_all_weights=tie_all_weights))
+        if self.tie_all_weights:
+            for layer in layers:
+                if layer.equalInOut:
+                    layer.conv2.tie_gates(last_conv)
+                else:
+                    layer.convShortcut.tie_gates(layer.conv2)
+                    last_conv = layer.conv2
+
+        self.layers = layers
         return nn.Sequential(*layers)
+
 
     def forward(self, x):
         return self.layer(x)
@@ -205,7 +228,7 @@ class NetworkBlock(nn.Module):
 
 class L0WideResNet(nn.Module):
     def __init__(self, depth, num_classes, widen_factor=1, droprate_init=0.3, N=50000, beta_ema=0.99,
-                 weight_decay=5e-4, local_rep=False, lamba=0.01, temperature=2./3.):
+                 weight_decay=5e-4, local_rep=False, lamba=0.01, temperature=2./3., tie_all_weights=False):
         super(L0WideResNet, self).__init__()
         nChannels = [16, 16*widen_factor, 32*widen_factor, 64*widen_factor]
         assert((depth - 4) % 6 == 0)
@@ -222,15 +245,15 @@ class L0WideResNet(nn.Module):
                                weight_decay=self.weight_decay)
         # 1st block
         self.block1 = NetworkBlock(self.n, nChannels[0], nChannels[1], block, 1, droprate_init, self.weight_decay,
-                                   self.lamba, local_rep=local_rep, temperature=temperature)
+                                   self.lamba, local_rep=local_rep, temperature=temperature, tie_all_weights=tie_all_weights)
         # 2nd block
         self.block2 = NetworkBlock(self.n, nChannels[1], nChannels[2], block, 2, droprate_init, self.weight_decay,
-                                   self.lamba, local_rep=local_rep, temperature=temperature)
+                                   self.lamba, local_rep=local_rep, temperature=temperature, tie_all_weights=tie_all_weights)
         # 3rd block
         self.block3 = NetworkBlock(self.n, nChannels[2], nChannels[3], block, 2, droprate_init, self.weight_decay,
-                                   self.lamba, local_rep=local_rep, temperature=temperature)
+                                   self.lamba, local_rep=local_rep, temperature=temperature, tie_all_weights=tie_all_weights)
         # bn, relu and classifier
-        self.bn = nn.BatchNorm2d(nChannels[3])
+        self.bn = nn.BatchNorm2d(nChannels[3], affine=not tie_all_weights)
         self.fcout = MAPDense(nChannels[3], num_classes, weight_decay=self.weight_decay)
 
         self.layers, self.bn_params = [], []
@@ -238,9 +261,12 @@ class L0WideResNet(nn.Module):
             if isinstance(m, MAPDense) or isinstance(m, MAPConv2d) or isinstance(m, L0Conv2d):
                 self.layers.append(m)
             elif isinstance(m, nn.BatchNorm2d):
-                m.weight.data.fill_(1)
-                m.bias.data.zero_()
-                self.bn_params += [m.weight, m.bias]
+                try:
+                    m.weight.data.fill_(1)
+                    m.bias.data.zero_()
+                    self.bn_params += [m.weight, m.bias]
+                except AttributeError:
+                    pass
 
         if beta_ema > 0.:
             print('Using temporal averaging with beta: {}'.format(beta_ema))
