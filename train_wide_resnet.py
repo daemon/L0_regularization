@@ -70,7 +70,10 @@ exp_flops, exp_l0 = [], []
 def gather_latencies(net, tie_all_weights=False, n_samples=1000):
     l0_modules = find_l0_modules(net)
     samples = []
-    last_sample = torch.Tensor([160]).cuda()
+    if tie_all_weights:
+        last_sample = torch.Tensor([16]).cuda()
+    else:
+        last_sample = torch.Tensor([160]).cuda()
     measurements = torch.zeros(n_samples).cuda()
     lp = torch.zeros(n_samples).cuda()
     for block in (net.block1, net.block2, net.block3):

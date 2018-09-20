@@ -253,7 +253,7 @@ class L0WideResNet(nn.Module):
         self.block3 = NetworkBlock(self.n, nChannels[2], nChannels[3], block, 2, droprate_init, self.weight_decay,
                                    self.lamba, local_rep=local_rep, temperature=temperature, tie_all_weights=tie_all_weights)
         # bn, relu and classifier
-        self.bn = nn.BatchNorm2d(nChannels[3], affine=not tie_all_weights)
+        self.bn = nn.BatchNorm2d(nChannels[3]) #, affine=not tie_all_weights)
         self.fcout = MAPDense(nChannels[3], num_classes, weight_decay=self.weight_decay)
 
         self.layers, self.bn_params = [], []
