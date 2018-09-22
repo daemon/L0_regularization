@@ -152,15 +152,6 @@ def main():
     l0_modules = find_l0_modules(model)
     parameters = list(model.parameters())
     if args.finetune:
-        args.lr = args.lr * 0.2 * 0.2 * 0.2 * 0.2
-        args.epochs += 100
-        # parameters = []
-        for module in l0_modules:
-            module.freeze()
-            # for parameter in module.parameters():
-            #     if parameter is not module.qz_loga:
-            #         parameters.append(parameter)
-    if args.finetune:
         optimizer = torch.optim.SGD(parameters, args.lr, momentum=args.momentum, nesterov=True, weight_decay=args.weight_decay)
     else:
         optimizer = torch.optim.SGD(parameters, args.lr, momentum=args.momentum, nesterov=True)
@@ -173,8 +164,15 @@ def main():
             args.start_epoch = checkpoint['epoch']
             best_prec1 = checkpoint['best_prec1']
             model.load_state_dict(checkpoint['state_dict'], strict=False)
+            if args.finetune:
+                args.lr = args.lr * 0.2 * 0.2 * 0.2
+                optimizer = torch.optim.SGD(parameters, args.lr, momentum=args.momentum, nesterov=True, weight_decay=args.weight_decay)
+                args.epochs += 100
+                # parameters = []
+                model.freeze()
             optimizer.load_state_dict(checkpoint['optimizer'])
-            optimizer.param_groups[0]["weight_decay"] = args.weight_decay
+            if args.finetune:
+                optimizer.param_groups[0]["weight_decay"] = args.weight_decay
             total_steps = checkpoint['total_steps']
             time_acc = checkpoint['time_acc']
             exp_flops = checkpoint['exp_flops']

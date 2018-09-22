@@ -94,6 +94,7 @@ class L0Dense(Module):
         self.prior_prec = weight_decay
         self.weights = Parameter(torch.Tensor(in_features, out_features))
         self.qz_loga = Parameter(torch.Tensor(in_features))
+        self.qz_loga.logalpha = True
         self.temperature = temperature
         self.droprate_init = droprate_init if droprate_init != 0. else 0.5
         self.lamba = lamba
@@ -289,6 +290,7 @@ class L0Conv2d(Module):
         self.use_bias = False
         self.weights = Parameter(torch.Tensor(out_channels, in_channels // groups, *self.kernel_size))
         self.qz_loga = Parameter(torch.Tensor(out_channels))
+        self.qz_loga.logalpha = True
         self.dim_z = out_channels
         self.input_shape = None
         self.local_rep = local_rep
@@ -307,6 +309,7 @@ class L0Conv2d(Module):
         print(self)
 
     def freeze(self):
+        self.zero_indices = self.compute_pi() == 0
         self.frozen = True
 
     def reset_parameters(self):
@@ -364,6 +367,8 @@ class L0Conv2d(Module):
 
     def constrain_parameters(self, **kwargs):
         self.qz_loga.data.clamp_(min=math.log(1e-2), max=math.log(1e2))
+        if self.frozen:
+            self.qz_loga.data[self.zero_indices] = math.log(1e-2)
 
     def cdf_qz(self, x):
         """Implements the CDF of the 'stretched' concrete distribution"""
@@ -426,7 +431,8 @@ class L0Conv2d(Module):
         else:  # mode
             pi = F.sigmoid(self.qz_loga).view(1, self.dim_z, 1, 1)
             if self.frozen:
-                return (pi * (limit_b - limit_a) + limit_a).clamp(0, 1)
+                z = (pi * (limit_b - limit_a) + limit_a).clamp(0, 1)
+                return z
             else:
                 return F.hardtanh(pi * (limit_b - limit_a) + limit_a, min_val=0, max_val=1)
 

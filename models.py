@@ -277,6 +277,7 @@ class L0WideResNet(nn.Module):
             self.steps_ema = 0.
 
         print('Using weight decay: {}'.format(self.weight_decay))
+        self.frozen = False
 
     def forward(self, x):
         out = self.conv1(x)
@@ -287,6 +288,11 @@ class L0WideResNet(nn.Module):
         out = F.avg_pool2d(out, 8)
         out = out.view(out.size(0), -1)
         return self.fcout(out)
+
+    def freeze(self):
+        self.frozen = True
+        for module in find_l0_modules(self):
+            module.freeze()
 
     def regularization(self):
         regularization = 0.
