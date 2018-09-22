@@ -251,7 +251,8 @@ class L0Dense(Module):
 class L0Conv2d(Module):
     """Implementation of L0 regularization for the feature maps of a convolutional layer"""
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=True,
-                 droprate_init=0.5, temperature=2./3., weight_decay=1., lamba=1., local_rep=False, load_lat_table=True, **kwargs):
+                 droprate_init=0.5, temperature=2./3., weight_decay=1., lamba=1., local_rep=False, load_lat_table=True, 
+                 nodrop=False, **kwargs):
         """
         :param in_channels: Number of input channels
         :param out_channels: Number of output channels
@@ -278,6 +279,7 @@ class L0Conv2d(Module):
         self.stride = pair(stride)
         self.padding = pair(padding)
         self.dilation = pair(dilation)
+        self.nodrop = nodrop
         self.output_padding = pair(0)
         self.groups = groups
         self.prior_prec = weight_decay
@@ -295,6 +297,7 @@ class L0Conv2d(Module):
         self.after = False
         self.before = False
         self.index_mask = None
+        self.frozen = False
 
         if bias:
             self.bias = Parameter(torch.Tensor(out_channels))
@@ -302,6 +305,9 @@ class L0Conv2d(Module):
 
         self.reset_parameters()
         print(self)
+
+    def freeze(self):
+        self.frozen = True
 
     def reset_parameters(self):
         init.kaiming_normal(self.weights, mode='fan_in')
@@ -311,9 +317,13 @@ class L0Conv2d(Module):
         if self.use_bias:
             self.bias.data.fill_(0)
 
-    def n_active(self):
+    def compute_pi(self):
         pi = F.sigmoid(self.qz_loga)
         pi = F.hardtanh(pi * (limit_b - limit_a) + limit_a, min_val=0, max_val=1)
+        return pi
+
+    def n_active(self):
+        pi = self.compute_pi()
         return (pi != 0).long().sum()
 
     def sample_dist(self):
@@ -415,7 +425,10 @@ class L0Conv2d(Module):
             return F.hardtanh(z, min_val=0, max_val=1)
         else:  # mode
             pi = F.sigmoid(self.qz_loga).view(1, self.dim_z, 1, 1)
-            return F.hardtanh(pi * (limit_b - limit_a) + limit_a, min_val=0, max_val=1)
+            if self.frozen:
+                return (pi * (limit_b - limit_a) + limit_a).clamp(0, 1)
+            else:
+                return F.hardtanh(pi * (limit_b - limit_a) + limit_a, min_val=0, max_val=1)
 
     def sample_weights(self):
         z = self.quantile_concrete(self.get_eps(floatTensor(self.dim_z))).view(self.dim_z, 1, 1, 1)
@@ -429,11 +442,14 @@ class L0Conv2d(Module):
             self.lat_table = LatencyTable.find(input_.size(-2), input_.size(-1), self, device=self.weights.device)
             self.load_lat_table = False
         b = None if not self.use_bias else self.bias
-        if self.local_rep or not self.training:
+        if self.local_rep or not self.training or self.frozen:
             if self.mask is None:
                 output = F.conv2d(input_, self.weights, b, self.stride, self.padding, self.dilation, self.groups)
-                z = self.sample_z(output.size(0), sample=self.training)
-                return output.mul(z)
+                z = self.sample_z(output.size(0), sample=self.training and not self.frozen)
+                if self.frozen and not self.nodrop:
+                    return F.dropout(output.mul(z), self.droprate_init)
+                else:
+                    return output.mul(z)
             else:
                 output = F.conv2d(input_, self.mask_weights, self.mask_bias, self.stride, self.padding, self.dilation, self.groups)
                 return output

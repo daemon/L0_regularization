@@ -22,6 +22,7 @@ parser.add_argument('--start-epoch', default=0, type=int,
                     help='manual epoch number (useful on restarts)')
 parser.add_argument('-b', '--batch-size', default=128, type=int,
                     help='mini-batch size (default: 128)')
+parser.add_argument("--finetune", action="store_true")
 parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
                     help='initial learning rate')
 parser.add_argument('--momentum', default=0.9, type=float, help='momentum')
@@ -148,7 +149,21 @@ def main():
         if torch.cuda.is_available():
             model = model.cuda()
 
-    optimizer = torch.optim.SGD(model.parameters(), args.lr, momentum=args.momentum, nesterov=True)
+    l0_modules = find_l0_modules(model)
+    parameters = list(model.parameters())
+    if args.finetune:
+        args.lr = args.lr * 0.2 * 0.2 * 0.2 * 0.2
+        args.epochs += 100
+        # parameters = []
+        for module in l0_modules:
+            module.freeze()
+            # for parameter in module.parameters():
+            #     if parameter is not module.qz_loga:
+            #         parameters.append(parameter)
+    if args.finetune:
+        optimizer = torch.optim.SGD(parameters, args.lr, momentum=args.momentum, nesterov=True, weight_decay=args.weight_decay)
+    else:
+        optimizer = torch.optim.SGD(parameters, args.lr, momentum=args.momentum, nesterov=True)
 
     # optionally resume from a checkpoint
     if args.resume:
@@ -157,8 +172,9 @@ def main():
             checkpoint = torch.load(args.resume)
             args.start_epoch = checkpoint['epoch']
             best_prec1 = checkpoint['best_prec1']
-            model.load_state_dict(checkpoint['state_dict'])
+            model.load_state_dict(checkpoint['state_dict'], strict=False)
             optimizer.load_state_dict(checkpoint['optimizer'])
+            optimizer.param_groups[0]["weight_decay"] = args.weight_decay
             total_steps = checkpoint['total_steps']
             time_acc = checkpoint['time_acc']
             exp_flops = checkpoint['exp_flops']
@@ -187,15 +203,18 @@ def main():
     # define loss function (criterion) and optimizer
     def loss_function(output, target_var, model):
         loss = loglike(output, target_var)
-        reg = model.regularization() if not args.multi_gpu else model.module.regularization()
-        if args.lat_lambda:
-            lat_loss = args.lat_lambda * gather_latencies(model, args.tie_all_weights)
+        if args.finetune:
+            total_loss = loss
         else:
-            lat_loss = 0
-        # print(lat_loss.item(), reg.item())
-        # print(reg.item())
-        # lat_loss = 0
-        total_loss = loss + lat_loss + reg
+            reg = model.regularization() if not args.multi_gpu else model.module.regularization()
+            if args.lat_lambda:
+                lat_loss = args.lat_lambda * gather_latencies(model, args.tie_all_weights)
+            else:
+                lat_loss = 0
+            # print(lat_loss.item(), reg.item())
+            # print(reg.item())
+            # lat_loss = 0
+            total_loss = loss + lat_loss + reg
         if torch.cuda.is_available():
             total_loss = total_loss.cuda()
         return total_loss
