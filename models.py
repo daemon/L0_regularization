@@ -154,6 +154,14 @@ class L0LeNet5(nn.Module):
         return params
 
 
+def find_wrn_table(in_planes, stride):
+    planes = [160, 320, 640]
+    for idx, p in enumerate(planes):
+        if in_planes <= p:
+            break
+    return f"wrn{idx + 1}_st{stride}.csv"
+
+
 class BasicBlock(nn.Module):
     def __init__(self, in_planes, out_planes, stride, droprate_init=0.0, weight_decay=0., lamba=0.01, local_rep=False,
                  temperature=2./3., tie_all_weights=False):
@@ -161,7 +169,7 @@ class BasicBlock(nn.Module):
         self.bn1 = nn.BatchNorm2d(in_planes)
         self.conv1 = L0Conv2d(in_planes, out_planes, kernel_size=3, stride=1, padding=1, bias=False,
                               droprate_init=droprate_init, weight_decay=weight_decay / (1 - 0.3), local_rep=local_rep,
-                              lamba=lamba, temperature=temperature)
+                              lamba=lamba, temperature=temperature, lat_table=find_wrn_table(in_planes, 1))
 
         self.bn2 = nn.BatchNorm2d(out_planes)
         self.tie_all_weights = tie_all_weights
@@ -171,7 +179,7 @@ class BasicBlock(nn.Module):
                 weight_decay=weight_decay / (1 - droprate_reduced), droprate_init=droprate_reduced, local_rep=local_rep, temperature=temperature, lamba=lamba)
         else:
             self.conv2 = MAPConv2d(out_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False,
-                                   weight_decay=weight_decay)
+                                   weight_decay=weight_decay, lat_table=find_wrn_table(out_planes, stride))
 
         self.equalInOut = (in_planes == out_planes)
         if tie_all_weights:
@@ -289,10 +297,10 @@ class L0WideResNet(nn.Module):
         out = out.view(out.size(0), -1)
         return self.fcout(out)
 
-    def freeze(self):
+    def freeze(self, dropout):
         self.frozen = True
         for module in find_l0_modules(self):
-            module.freeze()
+            module.freeze(dropout)
 
     def regularization(self):
         regularization = 0.

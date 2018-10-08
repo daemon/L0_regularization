@@ -68,7 +68,7 @@ class MAPDense(Module):
 
 class MAPConv2d(Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=True,
-                 weight_decay=1., **kwargs):
+                 weight_decay=1., lat_table="", **kwargs):
         super(MAPConv2d, self).__init__()
         self.weight_decay = weight_decay
         self.floatTensor = torch.FloatTensor if not torch.cuda.is_available() else torch.cuda.FloatTensor
@@ -79,7 +79,6 @@ class MAPConv2d(Module):
         self.padding = pair(padding)
         self.dilation = pair(dilation)
         self.output_padding = pair(0)
-        self.load_lat_table = True
         self.groups = groups
         self.weight = Parameter(torch.Tensor(out_channels, in_channels // groups, *self.kernel_size))
         if bias:
@@ -87,6 +86,9 @@ class MAPConv2d(Module):
         else:
             self.register_parameter('bias', None)
 
+        self.lat_table = None
+        if lat_table:
+            self.lat_table = LatencyTable.find(lat_table)
         self.reset_parameters()
         self.input_shape = None
         print(self)
@@ -132,13 +134,13 @@ class MAPConv2d(Module):
     def forward(self, input_):
         if self.input_shape is None:
             self.input_shape = input_.size()
-        if self.load_lat_table:
-            # print(self.in_channels, self.out_channels, self.kernel_size, input_.size(-2), input_.size(-1), self.stride, self.padding)
-            try:
-                self.lat_table = LatencyTable.find(input_.size(-2), input_.size(-1), self, device=input_.device)
-            except FileNotFoundError:
-                pass
-            self.load_lat_table = False
+        # if self.load_lat_table:
+        #     # print(self.in_channels, self.out_channels, self.kernel_size, input_.size(-2), input_.size(-1), self.stride, self.padding)
+        #     try:
+        #         self.lat_table = LatencyTable.find(input_.size(-2), input_.size(-1), self, device=input_.device)
+        #     except FileNotFoundError:
+        #         pass
+        #     self.load_lat_table = False
         output = F.conv2d(input_, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
         return output
 

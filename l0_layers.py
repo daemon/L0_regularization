@@ -1,6 +1,8 @@
 from functools import lru_cache
-import torch
 import math
+
+import pandas as pd
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.modules import Module
@@ -21,16 +23,28 @@ def config_filename(height, width, kernel_size, padding, stride, cuda):
 
 class LatencyTable(nn.Module):
 
-    def __init__(self, filename, bias=-1, multiplier=10):
+    def __init__(self, filename, bias=-1, multiplier=16):
         super().__init__()
-        with open(filename) as f:
-            lines = f.readlines()
+        measures = pd.read_csv(filename)
+        key_columns = measures.columns.tolist()
+        try:
+            key_columns.remove("measurements")
+            key_columns.remove("idx")
+        except:
+            pass
+        if len(key_columns) > 2:
+            raise ValueError("Only bilerp supported for now.")
+        key_columns.sort()
         data = []
-        for line in lines:
-            i, j, lat = line.split(",")
+        for _, row in measures.iterrows():
+            if len(key_columns) == 1:
+                i = 1
+            else:
+                i = row[key_columns[0]]
+            j = row[key_columns[-1]]
             i = (int(i) + bias) // multiplier
             j = (int(j) + bias) // multiplier
-            lat = float(lat)
+            lat = float(row["measurements"])
             data.append((i, j, lat))
         self.bias = bias
         self.multiplier = multiplier
@@ -42,9 +56,9 @@ class LatencyTable(nn.Module):
 
     @classmethod
     @lru_cache(maxsize=10000)
-    def find(cls, height, width, conv, bias=-1, multiplier=10, cuda=False, device=None):
-        cfg_filename = config_filename(height, width, conv.kernel_size[0], conv.padding[0], conv.stride[0], cuda)
-        lat_table = cls(cfg_filename, bias=bias, multiplier=multiplier)
+    def find(cls, filename, bias=-1, multiplier=16, cuda=False, device=None):
+        # cfg_filename = config_filename(height, width, conv.kernel_size[0], conv.padding[0], conv.stride[0], cuda)
+        lat_table = cls(filename, bias=bias, multiplier=multiplier)
         if device is not None:
             lat_table = lat_table.to(device)
         # print(lat_table.table[:2, :2].cpu().numpy())
@@ -252,7 +266,7 @@ class L0Dense(Module):
 class L0Conv2d(Module):
     """Implementation of L0 regularization for the feature maps of a convolutional layer"""
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=True,
-                 droprate_init=0.5, temperature=2./3., weight_decay=1., lamba=1., local_rep=False, load_lat_table=True, 
+                 droprate_init=0.5, temperature=2./3., weight_decay=1., lamba=1., local_rep=False, lat_table="", 
                  nodrop=False, **kwargs):
         """
         :param in_channels: Number of input channels
@@ -295,7 +309,9 @@ class L0Conv2d(Module):
         self.input_shape = None
         self.local_rep = local_rep
         self.mask = None
-        self.load_lat_table = load_lat_table
+        self.lat_table = ""
+        if lat_table:
+            self.lat_table = LatencyTable.find(lat_table)
         self.after = False
         self.before = False
         self.index_mask = None
@@ -308,9 +324,10 @@ class L0Conv2d(Module):
         self.reset_parameters()
         print(self)
 
-    def freeze(self):
+    def freeze(self, finetune_dropout):
         self.zero_indices = self.compute_pi() == 0
         self.frozen = True
+        self.dropout_init = finetune_dropout
 
     def reset_parameters(self):
         init.kaiming_normal(self.weights, mode='fan_in')
@@ -443,17 +460,13 @@ class L0Conv2d(Module):
     def forward(self, input_):
         if self.input_shape is None:
             self.input_shape = input_.size()
-        if self.load_lat_table:
-            # print(self.in_channels, self.out_channels, self.kernel_size, input_.size(-2), input_.size(-1), self.stride, self.padding)
-            self.lat_table = LatencyTable.find(input_.size(-2), input_.size(-1), self, device=self.weights.device)
-            self.load_lat_table = False
         b = None if not self.use_bias else self.bias
         if self.local_rep or not self.training or self.frozen:
             if self.mask is None:
                 output = F.conv2d(input_, self.weights, b, self.stride, self.padding, self.dilation, self.groups)
                 z = self.sample_z(output.size(0), sample=self.training and not self.frozen)
                 if self.frozen and not self.nodrop:
-                    return F.dropout(output.mul(z), self.droprate_init)
+                    return output.mul(z)
                 else:
                     return output.mul(z)
             else:
@@ -467,7 +480,7 @@ class L0Conv2d(Module):
     def __repr__(self):
         s = ('{name}({in_channels}, {out_channels}, kernel_size={kernel_size}, stride={stride}, '
              'droprate_init={droprate_init}, temperature={temperature}, prior_prec={prior_prec}, '
-             'lamba={lamba}, local_rep={local_rep}, load_lat_table={load_lat_table}')
+             'lamba={lamba}, local_rep={local_rep}')
         if self.padding != (0,) * len(self.padding):
             s += ', padding={padding}'
         if self.dilation != (1,) * len(self.dilation):

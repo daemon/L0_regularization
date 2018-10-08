@@ -83,7 +83,8 @@ def cifar100(augment=True, batch_size=128):
         ])
 
     print(logging + ' CIFAR 100.')
-    kwargs = {'num_workers': 4, 'pin_memory': torch.cuda.is_available()}
+    # kwargs = {'num_workers': 4, 'pin_memory': torch.cuda.is_available()}
+    kwargs = {}
     train_loader = torch.utils.data.DataLoader(
         datasets.CIFAR100('../data', train=True, download=True,
                          transform=transform_train),

@@ -5,10 +5,13 @@ import os
 import time
 
 import neurometer
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
 from torch.utils.checkpoint import checkpoint
+from tqdm import tqdm
 
 import l0_layers
 from models import L0LeNet5, find_l0_modules
@@ -42,6 +45,8 @@ parser.add_argument('--lambas', nargs='*', type=float, default=[0.1, 0.1, 0.1, 0
 parser.add_argument('--local_rep', action='store_true')
 parser.add_argument('--temp', type=float, default=2./3.)
 parser.add_argument('--multi_gpu', action='store_true')
+parser.add_argument("--data_prefix", default="../neurometer-measurements/lenet5/cpu_i7-8700k")
+parser.add_argument("--target_latency", default=1.2E-4, help="Target latency in seconds.")
 parser.set_defaults(tensorboard=True)
 
 best_prec1 = 100
@@ -50,22 +55,25 @@ total_steps = 0
 exp_flops, exp_l0 = [], []
 
 
-def load_cfg_table(filename):
-    conv = []
-    with open(filename) as f:
-        lines = f.readlines()
-    max_row = 0
-    max_col = 0
-    for line in lines:
-        i, j, lat = line.split(",")
-        max_row = max(int(i), max_row)
-        max_col = max(int(j), max_col)
-        conv.append(float(lat))
-    return torch.Tensor(conv).view(max_row, max_col)
+def load_cfg_table(filename, dims):
+    print(f"Reading CSV {filename}...")
+    df = pd.read_csv(os.path.join(args.data_prefix, filename))
+    diff_keys = list(df.keys())
+    diff_keys.remove("measurements")
+    diff_keys.remove("idx")
+    df = df.groupby(diff_keys).quantile(0.75).reset_index()
+    table = torch.empty(*dims)
+    for _, row in tqdm(df.iterrows()):
+        idx = [torch.LongTensor([int(x) - 1]) for x in row[:len(diff_keys)]]
+        table[idx] = row[-1]
+        # table[int(idx) - 1] = row[-1]
+    return table
 
-conv_table = load_cfg_table("conv_measures_cpu").cuda()
-conv_table2 = load_cfg_table("conv_measures_cpu_2").cuda()
-lin_table = load_cfg_table("lin_measures_cpu").cuda()
+args = parser.parse_args()
+
+conv_table2 = load_cfg_table("lenet5_conv2.csv", [20, 50]).cuda()
+conv_table = load_cfg_table("lenet5_conv1.csv", [20]).cuda()
+lin_table = load_cfg_table("lenet5_fc1.csv", [500, 50]).cuda()
 
 def gather_latencies(net, inp_size=(1, 1, 28, 28)):
     watch = neurometer.LatencyWatch()
@@ -87,7 +95,7 @@ def gather_latencies(net, inp_size=(1, 1, 28, 28)):
     idx1 = m1.sum(1).long().clamp(max=19)
     idx2 = m2.sum(1).long().clamp(max=49)
     idx3 = m3.sum(1).long().clamp(max=499)
-    measurements = conv_table[0, idx1] + conv_table2[idx1, idx2] + lin_table[idx2 * 16, 499] + lin_table[idx3, 10]
+    measurements = (conv_table[idx1] + conv_table2[idx1, idx2] + lin_table[499, idx2] - args.target_latency).clamp_(min=0) # + lin_table[idx3, 10]
     lp = sd1.log_prob(m1).sum(1) + sd2.log_prob(m2).sum(1) + sd3.log_prob(m3).sum(1)
 
     # sd3 = dnn.sample_dist()
@@ -166,8 +174,8 @@ def main():
     # define loss function (criterion) and optimizer
     def loss_function(output, target_var, model):
         loss = loglike(output, target_var)
-        latency_loss = 1E3 * gather_latencies(model).cuda()
-        total_loss = loss + latency_loss # + model.regularization()
+        latency_loss = 5E3 * gather_latencies(model).cuda()
+        total_loss = loss + latency_loss + model.regularization()
         if torch.cuda.is_available() and args.use_cuda:
             total_loss = total_loss.cuda()
         return total_loss

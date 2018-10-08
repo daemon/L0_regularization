@@ -18,6 +18,7 @@ from torch.optim import lr_scheduler
 parser = argparse.ArgumentParser(description='PyTorch WideResNet Training')
 parser.add_argument('--epochs', default=200, type=int,
                     help='number of total epochs to run')
+parser.add_argument("--finetune_dropout", default=0.3, type=float)
 parser.add_argument('--start-epoch', default=0, type=int,
                     help='manual epoch number (useful on restarts)')
 parser.add_argument('-b', '--batch-size', default=128, type=int,
@@ -55,7 +56,7 @@ parser.add_argument('--beta_ema', type=float, default=0.99)
 parser.add_argument('--lr_decay_ratio', type=float, default=0.2)
 parser.add_argument('--dataset', choices=['c10', 'c100'], default='c10')
 parser.add_argument('--local_rep', action='store_true')
-parser.add_argument('--epoch_drop', nargs='*', type=int, default=(60, 120, 160))
+parser.add_argument('--epoch_drop', nargs='*', type=int, default=(60, 120, 160, 220))
 parser.add_argument('--temp', type=float, default=2./3.)
 parser.set_defaults(bottleneck=True)
 parser.set_defaults(augment=True)
@@ -151,10 +152,10 @@ def main():
 
     l0_modules = find_l0_modules(model)
     parameters = list(model.parameters())
-    if args.finetune:
-        optimizer = torch.optim.SGD(parameters, args.lr, momentum=args.momentum, nesterov=True, weight_decay=args.weight_decay)
-    else:
-        optimizer = torch.optim.SGD(parameters, args.lr, momentum=args.momentum, nesterov=True)
+    # if args.finetune:
+    #     optimizer = torch.optim.SGD(parameters, args.lr, momentum=args.momentum, nesterov=True, weight_decay=args.weight_decay)
+    # else:
+    optimizer = torch.optim.SGD(parameters, args.lr, momentum=args.momentum, nesterov=True)
 
     # optionally resume from a checkpoint
     if args.resume:
@@ -166,10 +167,10 @@ def main():
             model.load_state_dict(checkpoint['state_dict'], strict=False)
             if args.finetune:
                 args.lr = args.lr * 0.2 * 0.2 * 0.2
-                optimizer = torch.optim.SGD(parameters, args.lr, momentum=args.momentum, nesterov=True, weight_decay=args.weight_decay)
-                args.epochs += 100
+                optimizer = torch.optim.SGD(parameters, args.lr, momentum=args.momentum, nesterov=True)#, weight_decay=args.weight_decay)
+                args.epochs += 50
                 # parameters = []
-                model.freeze()
+                model.freeze(args.finetune_dropout)
             optimizer.load_state_dict(checkpoint['optimizer'])
             if args.finetune:
                 optimizer.param_groups[0]["weight_decay"] = args.weight_decay
@@ -202,7 +203,8 @@ def main():
     def loss_function(output, target_var, model):
         loss = loglike(output, target_var)
         if args.finetune:
-            total_loss = loss
+            reg = model.regularization() if not args.multi_gpu else model.module.regularization()
+            total_loss = loss + reg
         else:
             reg = model.regularization() if not args.multi_gpu else model.module.regularization()
             if args.lat_lambda:
