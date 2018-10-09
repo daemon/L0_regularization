@@ -53,6 +53,7 @@ parser.add_argument('--lamba', type=float, default=0.001,
                     help='Coefficient for the L0 term.')
 parser.add_argument("--tie_all_weights", action="store_true")
 parser.add_argument('--beta_ema', type=float, default=0.99)
+parser.add_argument('--target_latency', type=float, default=0)
 parser.add_argument('--lr_decay_ratio', type=float, default=0.2)
 parser.add_argument('--dataset', choices=['c10', 'c100'], default='c10')
 parser.add_argument('--local_rep', action='store_true')
@@ -69,7 +70,7 @@ total_steps = 0
 exp_flops, exp_l0 = [], []
 
 
-def gather_latencies(net, tie_all_weights=False, n_samples=1000):
+def gather_latencies(net, tie_all_weights=False, n_samples=1000, target=0):
     l0_modules = find_l0_modules(net)
     samples = []
     if tie_all_weights:
@@ -110,7 +111,7 @@ def gather_latencies(net, tie_all_weights=False, n_samples=1000):
                 lp += sd1.log_prob(mask).sum(1)
                 measurements += layer.conv1.lat_table(torch.cuda.LongTensor([layer.conv1.in_channels]), s1)
                 measurements += layer.conv2.lat_table(s1, torch.cuda.LongTensor([layer.conv2.out_channels]))
-    return (lp * measurements).mean()
+    return (lp * (measurements - target).clamp(min=0)).mean()
 
 def main():
     global args, best_prec1, writer, time_acc, total_steps, exp_flops, exp_l0
@@ -208,7 +209,7 @@ def main():
         else:
             reg = model.regularization() if not args.multi_gpu else model.module.regularization()
             if args.lat_lambda:
-                lat_loss = args.lat_lambda * gather_latencies(model, args.tie_all_weights)
+                lat_loss = args.lat_lambda * gather_latencies(model, args.tie_all_weights, target=args.target_latency)
             else:
                 lat_loss = 0
             # print(lat_loss.item(), reg.item())
@@ -256,7 +257,7 @@ def main():
             if model.module.beta_ema > 0:
                 state['avg_params'] = model.module.avg_param
                 state['steps_ema'] = model.module.steps_ema
-        save_checkpoint(state, is_best, args.name)
+        save_checkpoint(state, is_best, args.name, epoch=epoch)
     print('Best error: ', best_prec1)
     if args.tensorboard:
         writer.close()

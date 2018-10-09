@@ -36,6 +36,9 @@ class LatencyTable(nn.Module):
             raise ValueError("Only bilerp supported for now.")
         key_columns.sort()
         data = []
+        measures = measures.groupby(key_columns).quantile(0.75).reset_index()
+        row_size = 0
+        col_size = 0
         for _, row in measures.iterrows():
             if len(key_columns) == 1:
                 i = 1
@@ -44,11 +47,14 @@ class LatencyTable(nn.Module):
             j = row[key_columns[-1]]
             i = (int(i) + bias) // multiplier
             j = (int(j) + bias) // multiplier
+            row_size = max(row_size, i)
+            col_size = max(col_size, j)
             lat = float(row["measurements"])
             data.append((i, j, lat))
         self.bias = bias
         self.multiplier = multiplier
-        row_size, col_size = i + 1, j + 1
+        row_size += 1
+        col_size += 1
         self.register_buffer("table", torch.empty(row_size, col_size))
         for i, j, lat in data:
             self.table[i, j] = lat
