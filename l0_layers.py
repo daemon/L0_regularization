@@ -23,7 +23,7 @@ def config_filename(height, width, kernel_size, padding, stride, cuda):
 
 class LatencyTable(nn.Module):
 
-    def __init__(self, filename, bias=-1, multiplier=16):
+    def __init__(self, filename, bias=-1, multiplier=16, compute="mean"):
         super().__init__()
         measures = pd.read_csv(filename)
         key_columns = measures.columns.tolist()
@@ -36,7 +36,10 @@ class LatencyTable(nn.Module):
             raise ValueError("Only bilerp supported for now.")
         key_columns.sort()
         data = []
-        measures = measures.groupby(key_columns).quantile(0.75).reset_index()
+        if compute == "mean":
+            measures = measures.groupby(key_columns).mean().reset_index()
+        else:
+            measures = measures.groupby(key_columns).quantile(0.75).reset_index()
         row_size = 0
         col_size = 0
         for _, row in measures.iterrows():
