@@ -23,7 +23,7 @@ def config_filename(height, width, kernel_size, padding, stride, cuda):
 
 class LatencyTable(nn.Module):
 
-    def __init__(self, filename, bias=-1, multiplier=16, compute="mean"):
+    def __init__(self, filename, bias=-1, multiplier=16, compute="quantile"):
         super().__init__()
         measures = pd.read_csv(filename)
         key_columns = measures.columns.tolist()
@@ -147,11 +147,12 @@ class L0Dense(Module):
         """Implements the CDF of the 'stretched' concrete distribution"""
         xn = (x - limit_a) / (limit_b - limit_a)
         logits = math.log(xn) - math.log(1 - xn)
-        return F.sigmoid(logits * self.temperature - self.qz_loga).clamp(min=epsilon, max=1 - epsilon)
+        return torch.sigmoid(logits * self.temperature - self.qz_loga).clamp(min=epsilon, max=1 - epsilon)
 
     def quantile_concrete(self, x):
+        x = x.to(self.qz_loga.device)
         """Implements the quantile, aka inverse CDF, of the 'stretched' concrete distribution"""
-        y = F.sigmoid((torch.log(x) - torch.log(1 - x) + self.qz_loga) / self.temperature)
+        y = torch.sigmoid((torch.log(x) - torch.log(1 - x) + self.qz_loga) / self.temperature)
         return y * (limit_b - limit_a) + limit_a
 
     def _reg_w(self):
@@ -175,7 +176,7 @@ class L0Dense(Module):
         if self.use_bias:
             expected_flops += self.out_features
             expected_l0 += self.out_features
-        return expected_flops.data[0], expected_l0.data[0]
+        return expected_flops.item(), expected_l0.item()
 
     def get_eps(self, size):
         """Uniform random numbers for the concrete distribution"""
@@ -190,7 +191,7 @@ class L0Dense(Module):
             z = self.quantile_concrete(eps)
             return F.hardtanh(z, min_val=0, max_val=1)
         else:  # mode
-            pi = F.sigmoid(self.qz_loga).view(1, self.in_features).expand(batch_size, self.in_features)
+            pi = torch.sigmoid(self.qz_loga).view(1, self.in_features).expand(batch_size, self.in_features)
             return F.hardtanh(pi * (limit_b - limit_a) + limit_a, min_val=0, max_val=1)
 
     def sample_dist(self):
@@ -240,7 +241,7 @@ class L0Dense(Module):
             self.mask = conv
 
     def n_active(self):
-        pi = F.sigmoid(self.qz_loga)
+        pi = torch.sigmoid(self.qz_loga)
         pi = F.hardtanh(pi * (limit_b - limit_a) + limit_a, min_val=0, max_val=1)
         return (pi != 0).long().sum()
 
@@ -318,9 +319,10 @@ class L0Conv2d(Module):
         self.input_shape = None
         self.local_rep = local_rep
         self.mask = None
-        self.lat_table = ""
-        if lat_table:
-            self.lat_table = LatencyTable.find(lat_table)
+        self.lat_table = None
+        self.alpha = Parameter(torch.empty(out_channels).fill_(2))
+        # if lat_table:
+        #     self.lat_table = LatencyTable.find(lat_table)
         self.after = False
         self.before = False
         self.index_mask = None
@@ -347,7 +349,7 @@ class L0Conv2d(Module):
             self.bias.data.fill_(0)
 
     def compute_pi(self):
-        pi = F.sigmoid(self.qz_loga)
+        pi = torch.sigmoid(self.qz_loga)
         pi = F.hardtanh(pi * (limit_b - limit_a) + limit_a, min_val=0, max_val=1)
         return pi
 
@@ -400,11 +402,12 @@ class L0Conv2d(Module):
         """Implements the CDF of the 'stretched' concrete distribution"""
         xn = (x - limit_a) / (limit_b - limit_a)
         logits = math.log(xn) - math.log(1 - xn)
-        return F.sigmoid(logits * self.temperature - self.qz_loga).clamp(min=epsilon, max=1 - epsilon)
+        return torch.sigmoid(logits * self.temperature - self.qz_loga).clamp(min=epsilon, max=1 - epsilon)
 
     def quantile_concrete(self, x):
         """Implements the quantile, aka inverse CDF, of the 'stretched' concrete distribution"""
-        y = F.sigmoid((torch.log(x) - torch.log(1 - x) + self.qz_loga) / self.temperature)
+        x = x.to(self.qz_loga.device)
+        y = torch.sigmoid((torch.log(x) - torch.log(1 - x) + self.qz_loga) / self.temperature)
         return y * (limit_b - limit_a) + limit_a
 
     def tie_gates(self, l0_layer):
@@ -440,22 +443,22 @@ class L0Conv2d(Module):
             expected_flops += num_instances_per_filter * ppos
             expected_l0 += ppos
 
-        return expected_flops.data[0], expected_l0.data[0]
+        return expected_flops.item(), expected_l0.item()
 
     def get_eps(self, size):
         """Uniform random numbers for the concrete distribution"""
-        eps = floatTensor(size).uniform_(epsilon, 1-epsilon)
+        eps = torch.FloatTensor(size).uniform_(epsilon, 1-epsilon)
         eps = Variable(eps)
         return eps
 
     def sample_z(self, batch_size, sample=True):
         """Sample the hard-concrete gates for training and use a deterministic value for testing"""
         if sample:
-            eps = self.get_eps(floatTensor(batch_size, self.dim_z))
+            eps = self.get_eps(torch.FloatTensor(batch_size, self.dim_z))
             z = self.quantile_concrete(eps).view(batch_size, self.dim_z, 1, 1)
             return F.hardtanh(z, min_val=0, max_val=1)
         else:  # mode
-            pi = F.sigmoid(self.qz_loga).view(1, self.dim_z, 1, 1)
+            pi = torch.sigmoid(self.qz_loga).view(1, self.dim_z, 1, 1)
             if self.frozen:
                 z = (pi * (limit_b - limit_a) + limit_a).clamp(0, 1)
                 return z
@@ -463,7 +466,7 @@ class L0Conv2d(Module):
                 return F.hardtanh(pi * (limit_b - limit_a) + limit_a, min_val=0, max_val=1)
 
     def sample_weights(self):
-        z = self.quantile_concrete(self.get_eps(floatTensor(self.dim_z))).view(self.dim_z, 1, 1, 1)
+        z = self.quantile_concrete(self.get_eps(torch.FloatTensor(self.dim_z))).view(self.dim_z, 1, 1, 1)
         return F.hardtanh(z, min_val=0, max_val=1) * self.weights
 
     def forward(self, input_):
@@ -473,7 +476,7 @@ class L0Conv2d(Module):
         if self.local_rep or not self.training or self.frozen:
             if self.mask is None:
                 output = F.conv2d(input_, self.weights, b, self.stride, self.padding, self.dilation, self.groups)
-                z = self.sample_z(output.size(0), sample=self.training and not self.frozen)
+                z = self.sample_z(output.size(0), sample=self.training and not self.frozen).to(output.device)
                 if self.frozen and not self.nodrop:
                     return output.mul(z)
                 else:
@@ -483,7 +486,7 @@ class L0Conv2d(Module):
                 return output
         else:
             weights = self.sample_weights()
-            output = F.conv2d(input_, weights, None, self.stride, self.padding, self.dilation, self.groups)
+            output = F.conv2d(input_, weights.to(input_.device), None, self.stride, self.padding, self.dilation, self.groups)
             return output
 
     def __repr__(self):

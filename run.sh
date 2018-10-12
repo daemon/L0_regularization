@@ -15,5 +15,24 @@
 # python train_wide_resnet.py --lat_lambda 10 --lamba 0 > wrn_notied_i7-8700k
 # python train_wide_resnet.py --lat_lambda 10 --lamba 0 --finetune --resume runs/wrn-latency/checkpoint.pth.tar > wrn_notied_i7-8700k_finetune
 
-python train_wide_resnet.py --lat_lambda 5 --lamba 0 --name wrn-latlamb5 > wrn_notied_i7-8700k-latlamb5
-python train_wide_resnet.py --lat_lambda 5 --lamba 0 --name wrn-latlamb5 --resume runs/wrn-latlamb5_28_10/checkpoint.pth.tar --finetune > wrn_notied_i7-8700k-latlamb5-finetune
+# python train_wide_resnet.py --lat_lambda 5 --lamba 0 --name wrn-latlamb5 > wrn_notied_i7-8700k-latlamb5
+# python train_wide_resnet.py --lat_lambda 5 --lamba 0 --name wrn-latlamb5 --resume runs/wrn-latlamb5_28_10/checkpoint.pth.tar --finetune > wrn_notied_i7-8700k-latlamb5-finetune
+
+# python train_wide_resnet.py --lat_lambda 5 --lamba 0 --name wrn-latlamb5-real #> wrn_notied_i7-8700k-latlamb5_2
+# python train_wide_resnet.py --lat_lambda 5 --lamba 0 --name wrn-latlamb5-real --resume runs/wrn-latlamb5-real_28_10/checkpoint.pth.tar --finetune # > wrn_notied_i7-8700k-latlamb5-finetune_2
+
+# python train_wide_resnet.py --lat_lambda 50 --lamba 0 --name wrn-latlamb50-target --target_latency 0.2 > latlamb50-target
+# python train_wide_resnet.py --lat_lambda 50 --lamba 0 --finetune --resume runs/wrn-latlamb50-target_28_10/checkpoint.pth.tar --name wrn-latlamb50-target --target_latency 0.2 > latlamb50-target-finetune
+
+
+# python train_wide_resnet.py --lat_lambda 20 --lamba 0 --name x # --target_latency 0
+# python train_wide_resnet.py --lat_lambda 50 --lamba 0 --finetune --resume runs/wrn-latlamb50-target_28_10/checkpoint.pth.tar --name wrn-latlamb50-target --target_latency 0.2 > 190-with-pruning-bn_log
+
+# python train_wide_resnet.py --resume_boiled wrn_boiled_acc_2.pt --lat_lambda 0 --lamba 0 --lr 0.0008 --finetune > boiling_log_wrn
+
+# python train_wide_resnet.py --boil --resume runs/wideresnet-paper-original-run/checkpoint.pth.tar --batch-size 32
+
+# python train_wide_resnet.py --resume_boiled wrn_boiled_cuda.pt --lat_lambda 0 --lamba 0 --lr 0.0008 --finetune > cuda_boiling_log_wrn2
+
+
+python train_wide_resnet.py --flops_lambda 3E-3 --target_flops 4000 --lamba 0 --name wrn-flopslamb1E-4

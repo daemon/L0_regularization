@@ -3,6 +3,8 @@ import os
 import shutil
 import time
 
+from tqdm import tqdm
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -13,6 +15,7 @@ from models import L0WideResNet, find_l0_modules
 from dataloaders import cifar10, cifar100
 from utils import save_checkpoint, AverageMeter, accuracy
 from torch.optim import lr_scheduler
+from neuro.neurometer import LatencyWatch
 
 
 parser = argparse.ArgumentParser(description='PyTorch WideResNet Training')
@@ -35,7 +38,7 @@ parser.add_argument('--depth', default=28, type=int,
                     help='total depth of the network (default: 28)')
 parser.add_argument('--width', default=10, type=int,
                     help='total width of the network (default: 10)')
-parser.add_argument("--lat_lambda", default=1E3, type=float)
+parser.add_argument("--flops_lambda", default=1E-4, type=float)
 parser.add_argument('--droprate_init', default=0.3, type=float,
                     help='dropout probability (default: 0.3)')
 parser.add_argument('--no-augment', dest='augment', action='store_false',
@@ -57,8 +60,11 @@ parser.add_argument('--target_latency', type=float, default=0)
 parser.add_argument('--lr_decay_ratio', type=float, default=0.2)
 parser.add_argument('--dataset', choices=['c10', 'c100'], default='c10')
 parser.add_argument('--local_rep', action='store_true')
+parser.add_argument('--boil', action='store_true')
 parser.add_argument('--epoch_drop', nargs='*', type=int, default=(60, 120, 160, 220))
 parser.add_argument('--temp', type=float, default=2./3.)
+parser.add_argument("--resume_boiled", type=str)
+parser.add_argument("--target_flops", type=float, default=0)
 parser.set_defaults(bottleneck=True)
 parser.set_defaults(augment=True)
 parser.set_defaults(tensorboard=True)
@@ -70,7 +76,29 @@ total_steps = 0
 exp_flops, exp_l0 = [], []
 
 
-def gather_latencies(net, tie_all_weights=False, n_samples=1000, target=0):
+def gather_flops(net, n_samples=1000):
+    l0_modules = find_l0_modules(net)
+    samples = []
+    flops = torch.zeros(n_samples).cuda()
+    lp = torch.zeros(n_samples).cuda()
+    for block in (net.block1, net.block2, net.block3):
+        for layer in block.layers:
+            sd1 = layer.conv1.sample_dist()
+            mask = sd1.sample((n_samples,))
+            s1 = mask.sum(1).float().cuda()
+            lp = lp + sd1.log_prob(mask).sum(1)
+            input_size = layer.conv1.input_shape
+            weight1_size = layer.conv1.weights.size()
+            weight2_size = layer.conv2.weight.size()
+            layer_flops = float(np.prod(input_size[2:])) * float(np.prod(weight1_size[1:])) * s1
+            layer_flops += float(np.prod(input_size[2:])) * weight2_size[0] * weight2_size[2] * weight2_size[3] * s1 / (layer.conv2.stride[0] ** 2)
+            flops += layer_flops
+    out = (lp * (flops / 1000000 - args.target_flops).clamp(min=0)).mean()
+    return out
+
+
+def gather_latencies(net, tie_all_weights=False, n_samples=1, target=0):
+    # return 0
     l0_modules = find_l0_modules(net)
     samples = []
     if tie_all_weights:
@@ -79,6 +107,7 @@ def gather_latencies(net, tie_all_weights=False, n_samples=1000, target=0):
         last_sample = torch.Tensor([160]).cuda()
     measurements = torch.zeros(n_samples).cuda()
     lp = torch.zeros(n_samples).cuda()
+    char_str = []
     for block in (net.block1, net.block2, net.block3):
         if tie_all_weights:
             for layer in block.layers:
@@ -106,12 +135,70 @@ def gather_latencies(net, tie_all_weights=False, n_samples=1000, target=0):
         else:
             for layer in block.layers:
                 sd1 = layer.conv1.sample_dist()
-                mask = sd1.sample_n(n_samples)
+                mask = sd1.sample((n_samples,))
                 s1 = mask.sum(1).long()
-                lp += sd1.log_prob(mask).sum(1)
-                measurements += layer.conv1.lat_table(torch.cuda.LongTensor([layer.conv1.in_channels]), s1)
-                measurements += layer.conv2.lat_table(s1, torch.cuda.LongTensor([layer.conv2.out_channels]))
-    return (lp * (measurements - target).clamp(min=0)).mean()
+                lp = lp + sd1.log_prob(mask).sum(1)
+                char_str.append(str(s1.item()))
+    measurements = measure_comp.measure_wrn_char_str("-".join(char_str))
+    out = (lp * max(measurements - target, 0)).mean()
+    return out
+
+def run_latency(model):
+    watch = LatencyWatch()
+    with torch.no_grad():
+        for _ in range(1):
+            model(torch.zeros(1, 3, 32, 32).cuda())
+        for _ in range(2):
+            with watch:
+                model(torch.zeros(1, 3, 32, 32).cuda())
+    # watch.write()
+    return watch.mean
+
+
+def boil_models(model, boiled_model, train_loader, val_loader):
+    model.cuda()
+    boiled_model.cuda()
+    boiled_model.eval()
+    model.eval()
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.alphas(), lr=0.1)#, momentum=0.1)
+    x = torch.zeros(1, 3, 32, 32).cuda()
+    for idx in tqdm(range(20), position=0):
+        pbar = tqdm(total=len(train_loader), position=1)
+        for i, (input_, target) in enumerate(train_loader):
+            if torch.cuda.is_available():
+                target = target.cuda(async=True)
+                input_ = input_.cuda()
+
+            # compute output
+            lp = model.sample_mask()
+            output = model(input_)
+
+            boiled_model.sample_mask(model)
+            latency = float(run_latency(boiled_model))
+
+            # measure accuracy and record loss
+            prec1 = accuracy(output.data, target, topk=(1,))[0]
+
+            # compute gradient and do SGD step
+            optimizer.zero_grad()
+            # loss = lp * (max(latency - 0.08, 0) * 150 - prec1 / 100)
+            # loss = lp * (max(latency - 0.08, 0) * 150 - 2 * prec1 / 100) # FINAL CPU
+            fig = max(latency / 0.004, 1)
+            if fig == 1:
+                fig = 0
+            loss = lp * (fig - prec1 / 100) # FINAL CUDA
+            loss.backward()
+            optimizer.step()
+
+            # clamp the parameters
+            layers = model.layers if not args.multi_gpu else model.module.layers
+            for k, layer in enumerate(layers):
+                layer.constrain_parameters()
+            pbar.update(1)
+            pbar.set_postfix(dict(lat=latency, acc=prec1.item()))
+        torch.save(model.state_dict(), "boiled_cuda.pt")
+        pbar.close()
 
 def main():
     global args, best_prec1, writer, time_acc, total_steps, exp_flops, exp_l0
@@ -136,8 +223,26 @@ def main():
     dataload = cifar10 if args.dataset == 'c10' else cifar100
     train_loader, val_loader, num_classes = dataload(augment=args.augment, batch_size=args.batch_size)
 
+
     # create model
     model = L0WideResNet(args.depth, num_classes, widen_factor=args.width, droprate_init=args.droprate_init,
+                         N=50000, beta_ema=args.beta_ema, weight_decay=args.weight_decay, local_rep=args.local_rep,
+                         lamba=args.lamba, temperature=args.temp, tie_all_weights=args.tie_all_weights)
+    if args.resume_boiled:
+        sd = torch.load(args.resume_boiled)
+        model.set_boiled_dict(sd)
+        model.load_state_dict(sd, strict=False)
+        model.init_beta_ema(args.beta_ema)
+        if args.finetune:
+            args.lr = 0.0008
+            args.epochs += 50
+            # parameters = []
+            model.freeze(args.finetune_dropout)
+            model.prune()
+        # model.sample_mask()
+
+    if args.boil:
+        boiled_model = L0WideResNet(args.depth, num_classes, widen_factor=args.width, droprate_init=args.droprate_init,
                          N=50000, beta_ema=args.beta_ema, weight_decay=args.weight_decay, local_rep=args.local_rep,
                          lamba=args.lamba, temperature=args.temp, tie_all_weights=args.tie_all_weights)
 
@@ -166,33 +271,40 @@ def main():
             args.start_epoch = checkpoint['epoch']
             best_prec1 = checkpoint['best_prec1']
             model.load_state_dict(checkpoint['state_dict'], strict=False)
+            if args.boil:
+                boiled_model.load_state_dict(checkpoint["state_dict"], strict=False)
             if args.finetune:
                 args.lr = args.lr * 0.2 * 0.2 * 0.2
                 optimizer = torch.optim.SGD(parameters, args.lr, momentum=args.momentum, nesterov=True)#, weight_decay=args.weight_decay)
                 args.epochs += 50
                 # parameters = []
                 model.freeze(args.finetune_dropout)
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            if args.finetune:
-                optimizer.param_groups[0]["weight_decay"] = args.weight_decay
-            total_steps = checkpoint['total_steps']
-            time_acc = checkpoint['time_acc']
-            exp_flops = checkpoint['exp_flops']
-            exp_l0 = checkpoint['exp_l0']
-            if checkpoint['beta_ema'] > 0:
-                if not args.multi_gpu:
-                    model.beta_ema = checkpoint['beta_ema']
-                    model.avg_param = checkpoint['avg_params']
-                    model.steps_ema = checkpoint['steps_ema']
-                else:
-                    model.module.beta_ema = checkpoint['beta_ema']
-                    model.module.avg_param = checkpoint['avg_params']
-                    model.module.steps_ema = checkpoint['steps_ema']
-            print("=> loaded checkpoint '{}' (epoch {})"
-                  .format(args.resume, checkpoint['epoch']))
+                model.prune()
+            if not args.boil and not args.resume_boiled:
+                optimizer.load_state_dict(checkpoint['optimizer'])
+                if args.finetune:
+                    optimizer.param_groups[0]["weight_decay"] = args.weight_decay
+                total_steps = checkpoint['total_steps']
+                time_acc = checkpoint['time_acc']
+                exp_flops = checkpoint['exp_flops']
+                exp_l0 = checkpoint['exp_l0']
+                if checkpoint['beta_ema'] > 0:
+                    if not args.multi_gpu:
+                        model.beta_ema = checkpoint['beta_ema']
+                        model.avg_param = checkpoint['avg_params']
+                        model.steps_ema = checkpoint['steps_ema']
+                    else:
+                        model.module.beta_ema = checkpoint['beta_ema']
+                        model.module.avg_param = checkpoint['avg_params']
+                        model.module.steps_ema = checkpoint['steps_ema']
+                print("=> loaded checkpoint '{}' (epoch {})"
+                      .format(args.resume, checkpoint['epoch']))
         else:
             print("=> no checkpoint found at '{}'".format(args.resume))
             total_steps, exp_flops, exp_l0 = 0, [], []
+    if args.boil:
+        boil_models(model, boiled_model, train_loader, val_loader)
+        return
 
     cudnn.benchmark = True
 
@@ -201,21 +313,21 @@ def main():
         loglike = loglike.cuda()
 
     # define loss function (criterion) and optimizer
-    def loss_function(output, target_var, model):
+    def loss_function(output, target_var, model, validate=False, epoch=0, lat_every=4):
         loss = loglike(output, target_var)
         if args.finetune:
             reg = model.regularization() if not args.multi_gpu else model.module.regularization()
             total_loss = loss + reg
         else:
             reg = model.regularization() if not args.multi_gpu else model.module.regularization()
-            if args.lat_lambda:
-                lat_loss = args.lat_lambda * gather_latencies(model, args.tie_all_weights, target=args.target_latency)
+            if args.flops_lambda and not validate:
+                flops_loss = args.flops_lambda * gather_flops(model)
             else:
-                lat_loss = 0
-            # print(lat_loss.item(), reg.item())
+                flops_loss = 0
+            # print(flops_loss.item(), reg.item())
             # print(reg.item())
-            # lat_loss = 0
-            total_loss = loss + lat_loss + reg
+            # flops_loss = 0
+            total_loss = loss + flops_loss + reg
         if torch.cuda.is_available():
             total_loss = total_loss.cuda()
         return total_loss
@@ -290,12 +402,12 @@ def train(train_loader, model, criterion, optimizer, lr_schedule, epoch):
 
         # compute output
         output = model(input_var)
-        loss = criterion(output, target_var, model)
+        loss = criterion(output, target_var, model, epoch=i)
 
         # measure accuracy and record loss
         prec1 = accuracy(output.data, target, topk=(1,))[0]
-        losses.update(loss.data[0], input_.size(0))
-        top1.update(100 - prec1[0], input_.size(0))
+        losses.update(loss.item(), input_.size(0))
+        top1.update(100 - prec1.item(), input_.size(0))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -369,17 +481,17 @@ def validate(val_loader, model, criterion, epoch):
         if torch.cuda.is_available():
             target = target.cuda(async=True)
             input_ = input_.cuda()
-        input_var = torch.autograd.Variable(input_, volatile=True)
-        target_var = torch.autograd.Variable(target, volatile=True)
+        input_var = input_
+        target_var = target
 
         # compute output
         output = model(input_var)
-        loss = criterion(output, target_var, model)
+        loss = criterion(output, target_var, model, validate=True)
 
         # measure accuracy and record loss
         prec1 = accuracy(output.data, target, topk=(1,))[0]
-        losses.update(loss.data[0], input_.size(0))
-        top1.update(100 - prec1[0], input_.size(0))
+        losses.update(loss.item(), input_.size(0))
+        top1.update(100 - prec1.item(), input_.size(0))
 
         # measure elapsed time
         batch_time.update(time.time() - end)

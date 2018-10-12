@@ -1,9 +1,12 @@
+import copy
+
 import torch
 import torch.nn as nn
 from l0_layers import L0Conv2d, L0Dense
 from base_layers import MAPConv2d, MAPDense
 from copy import deepcopy
 import torch.nn.functional as F
+import torch.distributions as dist
 
 
 
@@ -191,6 +194,38 @@ class BasicBlock(nn.Module):
             self.convShortcut = (not self.equalInOut) and \
                                 MAPConv2d(in_planes, out_planes, kernel_size=1, stride=stride, padding=0, bias=False,
                                           weight_decay=weight_decay) or None
+        self.pruned = False
+        self.masked = False
+
+    def prune(self):
+        pi = self.conv1.compute_pi()
+        self.pruned = True
+        self.register_buffer("prune_mask", (pi != 0).float().cuda())
+
+    def sample_mask(self, tied=None):
+        if not self.masked:
+            self.conv1_cpy = copy.deepcopy(self.conv1)
+            self.conv2_cpy = copy.deepcopy(self.conv2)
+            self.bn2_cpy = copy.deepcopy(self.bn2)
+        if tied is None:
+            d = dist.bernoulli.Bernoulli(probs=self.conv1.alpha.sigmoid())
+            self.mask = d.sample()
+        else:
+            self.mask = tied.mask
+        self.conv1.weights.data = self.conv1_cpy.weights.data[self.mask.byte()]
+        self.conv1.qz_loga.data = self.conv1_cpy.qz_loga.data[self.mask.byte()]
+        self.conv1.dim_z = self.mask.long().sum().item()
+        # self.conv1.bias.data = self.conv1_cpy.bias.data[self.mask.byte()]
+        self.conv2.weight.data = self.conv2_cpy.weight.data[:, self.mask.byte()]
+        self.bn2.weight.data = self.bn2_cpy.weight.data[self.mask.byte()]
+        self.bn2.bias.data = self.bn2_cpy.bias.data[self.mask.byte()]
+        self.bn2.running_mean.data = self.bn2_cpy.running_mean.data[self.mask.byte()]
+        self.bn2.running_var.data = self.bn2_cpy.running_var.data[self.mask.byte()]
+        self.masked = True
+        if tied is None:
+            return d.log_prob(self.mask).sum()
+        else:
+            return 0
 
     def forward(self, x):
         if not self.equalInOut:
@@ -199,7 +234,10 @@ class BasicBlock(nn.Module):
             out = F.relu(self.bn1(x))
 
         out = self.conv1(out if self.equalInOut else x)
-        out = self.conv2(F.relu(self.bn2(out)))
+        out = F.relu(self.bn2(out))
+        if self.pruned:
+            out = self.prune_mask.unsqueeze(0).unsqueeze(-1).unsqueeze(-1).expand_as(out) * out
+        out = self.conv2(out)
         return torch.add(out, x if self.equalInOut else self.convShortcut(x))
 
 
@@ -230,6 +268,22 @@ class NetworkBlock(nn.Module):
         self.layers = layers
         return nn.Sequential(*layers)
 
+    def alphas(self):
+        return [l.conv1.alpha for l in self.layers]
+
+    def sample_mask(self, tied=None):
+        lp = 0
+        if tied is None:
+            for l in self.layers:
+                lp += l.sample_mask()
+        else:
+            for l, t in zip(self.layers, tied.layers):
+                lp += l.sample_mask(t)
+        return lp
+
+    def prune(self):
+        for l in self.layers:
+            l.prune()
 
     def forward(self, x):
         return self.layer(x)
@@ -286,6 +340,132 @@ class L0WideResNet(nn.Module):
 
         print('Using weight decay: {}'.format(self.weight_decay))
         self.frozen = False
+
+    def init_beta_ema(self, beta_ema):
+        if beta_ema > 0.:
+            print('Using temporal averaging with beta: {}'.format(beta_ema))
+            self.avg_param = deepcopy(list(p.data for p in self.parameters()))
+            if torch.cuda.is_available():
+                self.avg_param = [a.cuda() for a in self.avg_param]
+            self.steps_ema = 0.
+
+    def set_boiled_dict(self, boiled_dict):
+        self.block1.layer[0].conv1.weights.data = boiled_dict["block1.layer.0.conv1.weights"]
+        self.block1.layer[0].conv1.qz_loga.data = boiled_dict["block1.layer.0.conv1.qz_loga"]
+        self.block1.layer[0].conv1.dim_z = self.block1.layer[0].conv1.qz_loga.data.size(0)
+        self.block1.layer[0].bn2.weight.data = boiled_dict["block1.layer.0.bn2.weight"]
+        self.block1.layer[0].bn2.bias.data = boiled_dict["block1.layer.0.bn2.bias"]
+        self.block1.layer[0].bn2.running_mean.data = boiled_dict["block1.layer.0.bn2.running_mean"]
+        self.block1.layer[0].bn2.running_var.data = boiled_dict["block1.layer.0.bn2.running_var"]
+        self.block1.layer[0].conv2.weight.data = boiled_dict["block1.layer.0.conv2.weight"]
+        self.block1.layer[1].conv1.weights.data = boiled_dict["block1.layer.1.conv1.weights"]
+        self.block1.layer[1].conv1.qz_loga.data = boiled_dict["block1.layer.1.conv1.qz_loga"]
+        self.block1.layer[1].conv1.dim_z = self.block1.layer[1].conv1.qz_loga.data.size(0)
+        self.block1.layer[1].bn2.weight.data = boiled_dict["block1.layer.1.bn2.weight"]
+        self.block1.layer[1].bn2.bias.data = boiled_dict["block1.layer.1.bn2.bias"]
+        self.block1.layer[1].bn2.running_mean.data = boiled_dict["block1.layer.1.bn2.running_mean"]
+        self.block1.layer[1].bn2.running_var.data = boiled_dict["block1.layer.1.bn2.running_var"]
+        self.block1.layer[1].conv2.weight.data = boiled_dict["block1.layer.1.conv2.weight"]
+        self.block1.layer[2].conv1.weights.data = boiled_dict["block1.layer.2.conv1.weights"]
+        self.block1.layer[2].conv1.qz_loga.data = boiled_dict["block1.layer.2.conv1.qz_loga"]
+        self.block1.layer[2].conv1.dim_z = self.block1.layer[2].conv1.qz_loga.data.size(0)
+        self.block1.layer[2].bn2.weight.data = boiled_dict["block1.layer.2.bn2.weight"]
+        self.block1.layer[2].bn2.bias.data = boiled_dict["block1.layer.2.bn2.bias"]
+        self.block1.layer[2].bn2.running_mean.data = boiled_dict["block1.layer.2.bn2.running_mean"]
+        self.block1.layer[2].bn2.running_var.data = boiled_dict["block1.layer.2.bn2.running_var"]
+        self.block1.layer[2].conv2.weight.data = boiled_dict["block1.layer.2.conv2.weight"]
+        self.block1.layer[3].conv1.weights.data = boiled_dict["block1.layer.3.conv1.weights"]
+        self.block1.layer[3].conv1.qz_loga.data = boiled_dict["block1.layer.3.conv1.qz_loga"]
+        self.block1.layer[3].conv1.dim_z = self.block1.layer[3].conv1.qz_loga.data.size(0)
+        self.block1.layer[3].bn2.weight.data = boiled_dict["block1.layer.3.bn2.weight"]
+        self.block1.layer[3].bn2.bias.data = boiled_dict["block1.layer.3.bn2.bias"]
+        self.block1.layer[3].bn2.running_mean.data = boiled_dict["block1.layer.3.bn2.running_mean"]
+        self.block1.layer[3].bn2.running_var.data = boiled_dict["block1.layer.3.bn2.running_var"]
+        self.block1.layer[3].conv2.weight.data = boiled_dict["block1.layer.3.conv2.weight"]
+        self.block2.layer[0].conv1.weights.data = boiled_dict["block2.layer.0.conv1.weights"]
+        self.block2.layer[0].conv1.qz_loga.data = boiled_dict["block2.layer.0.conv1.qz_loga"]
+        self.block2.layer[0].conv1.dim_z = self.block2.layer[0].conv1.qz_loga.data.size(0)
+        self.block2.layer[0].bn2.weight.data = boiled_dict["block2.layer.0.bn2.weight"]
+        self.block2.layer[0].bn2.bias.data = boiled_dict["block2.layer.0.bn2.bias"]
+        self.block2.layer[0].bn2.running_mean.data = boiled_dict["block2.layer.0.bn2.running_mean"]
+        self.block2.layer[0].bn2.running_var.data = boiled_dict["block2.layer.0.bn2.running_var"]
+        self.block2.layer[0].conv2.weight.data = boiled_dict["block2.layer.0.conv2.weight"]
+        self.block2.layer[1].conv1.weights.data = boiled_dict["block2.layer.1.conv1.weights"]
+        self.block2.layer[1].conv1.qz_loga.data = boiled_dict["block2.layer.1.conv1.qz_loga"]
+        self.block2.layer[1].conv1.dim_z = self.block2.layer[1].conv1.qz_loga.data.size(0)
+        self.block2.layer[1].bn2.weight.data = boiled_dict["block2.layer.1.bn2.weight"]
+        self.block2.layer[1].bn2.bias.data = boiled_dict["block2.layer.1.bn2.bias"]
+        self.block2.layer[1].bn2.running_mean.data = boiled_dict["block2.layer.1.bn2.running_mean"]
+        self.block2.layer[1].bn2.running_var.data = boiled_dict["block2.layer.1.bn2.running_var"]
+        self.block2.layer[1].conv2.weight.data = boiled_dict["block2.layer.1.conv2.weight"]
+        self.block2.layer[2].conv1.weights.data = boiled_dict["block2.layer.2.conv1.weights"]
+        self.block2.layer[2].conv1.qz_loga.data = boiled_dict["block2.layer.2.conv1.qz_loga"]
+        self.block2.layer[2].conv1.dim_z = self.block2.layer[2].conv1.qz_loga.data.size(0)
+        self.block2.layer[2].bn2.weight.data = boiled_dict["block2.layer.2.bn2.weight"]
+        self.block2.layer[2].bn2.bias.data = boiled_dict["block2.layer.2.bn2.bias"]
+        self.block2.layer[2].bn2.running_mean.data = boiled_dict["block2.layer.2.bn2.running_mean"]
+        self.block2.layer[2].bn2.running_var.data = boiled_dict["block2.layer.2.bn2.running_var"]
+        self.block2.layer[2].conv2.weight.data = boiled_dict["block2.layer.2.conv2.weight"]
+        self.block2.layer[3].conv1.weights.data = boiled_dict["block2.layer.3.conv1.weights"]
+        self.block2.layer[3].conv1.qz_loga.data = boiled_dict["block2.layer.3.conv1.qz_loga"]
+        self.block2.layer[3].conv1.dim_z = self.block2.layer[3].conv1.qz_loga.data.size(0)
+        self.block2.layer[3].bn2.weight.data = boiled_dict["block2.layer.3.bn2.weight"]
+        self.block2.layer[3].bn2.bias.data = boiled_dict["block2.layer.3.bn2.bias"]
+        self.block2.layer[3].bn2.running_mean.data = boiled_dict["block2.layer.3.bn2.running_mean"]
+        self.block2.layer[3].bn2.running_var.data = boiled_dict["block2.layer.3.bn2.running_var"]
+        self.block2.layer[3].conv2.weight.data = boiled_dict["block2.layer.3.conv2.weight"]
+        self.block3.layer[0].conv1.weights.data = boiled_dict["block3.layer.0.conv1.weights"]
+        self.block3.layer[0].conv1.qz_loga.data = boiled_dict["block3.layer.0.conv1.qz_loga"]
+        self.block3.layer[0].conv1.dim_z = self.block3.layer[0].conv1.qz_loga.data.size(0)
+        self.block3.layer[0].bn2.weight.data = boiled_dict["block3.layer.0.bn2.weight"]
+        self.block3.layer[0].bn2.bias.data = boiled_dict["block3.layer.0.bn2.bias"]
+        self.block3.layer[0].bn2.running_mean.data = boiled_dict["block3.layer.0.bn2.running_mean"]
+        self.block3.layer[0].bn2.running_var.data = boiled_dict["block3.layer.0.bn2.running_var"]
+        self.block3.layer[0].conv2.weight.data = boiled_dict["block3.layer.0.conv2.weight"]
+        self.block3.layer[1].conv1.weights.data = boiled_dict["block3.layer.1.conv1.weights"]
+        self.block3.layer[1].conv1.qz_loga.data = boiled_dict["block3.layer.1.conv1.qz_loga"]
+        self.block3.layer[1].conv1.dim_z = self.block3.layer[1].conv1.qz_loga.data.size(0)
+        self.block3.layer[1].bn2.weight.data = boiled_dict["block3.layer.1.bn2.weight"]
+        self.block3.layer[1].bn2.bias.data = boiled_dict["block3.layer.1.bn2.bias"]
+        self.block3.layer[1].bn2.running_mean.data = boiled_dict["block3.layer.1.bn2.running_mean"]
+        self.block3.layer[1].bn2.running_var.data = boiled_dict["block3.layer.1.bn2.running_var"]
+        self.block3.layer[1].conv2.weight.data = boiled_dict["block3.layer.1.conv2.weight"]
+        self.block3.layer[2].conv1.weights.data = boiled_dict["block3.layer.2.conv1.weights"]
+        self.block3.layer[2].conv1.qz_loga.data = boiled_dict["block3.layer.2.conv1.qz_loga"]
+        self.block3.layer[2].conv1.dim_z = self.block3.layer[2].conv1.qz_loga.data.size(0)
+        self.block3.layer[2].bn2.weight.data = boiled_dict["block3.layer.2.bn2.weight"]
+        self.block3.layer[2].bn2.bias.data = boiled_dict["block3.layer.2.bn2.bias"]
+        self.block3.layer[2].bn2.running_mean.data = boiled_dict["block3.layer.2.bn2.running_mean"]
+        self.block3.layer[2].bn2.running_var.data = boiled_dict["block3.layer.2.bn2.running_var"]
+        self.block3.layer[2].conv2.weight.data = boiled_dict["block3.layer.2.conv2.weight"]
+        self.block3.layer[3].conv1.weights.data = boiled_dict["block3.layer.3.conv1.weights"]
+        self.block3.layer[3].conv1.qz_loga.data = boiled_dict["block3.layer.3.conv1.qz_loga"]
+        self.block3.layer[3].conv1.dim_z = self.block3.layer[3].conv1.qz_loga.data.size(0)
+        self.block3.layer[3].bn2.weight.data = boiled_dict["block3.layer.3.bn2.weight"]
+        self.block3.layer[3].bn2.bias.data = boiled_dict["block3.layer.3.bn2.bias"]
+        self.block3.layer[3].bn2.running_mean.data = boiled_dict["block3.layer.3.bn2.running_mean"]
+        self.block3.layer[3].bn2.running_var.data = boiled_dict["block3.layer.3.bn2.running_var"]
+        self.block3.layer[3].conv2.weight.data = boiled_dict["block3.layer.3.conv2.weight"]
+
+    def prune(self):
+        self.block1.prune()
+        self.block2.prune()
+        self.block3.prune()
+
+    def sample_mask(self, tied=None):
+        block1 = None if tied is None else tied.block1
+        block2 = None if tied is None else tied.block2
+        block3 = None if tied is None else tied.block3
+        return self.block1.sample_mask(block1) + \
+            self.block2.sample_mask(block2) + \
+            self.block3.sample_mask(block3)
+
+    def alphas(self):
+        alphas = []
+        alphas.extend(self.block1.alphas())
+        alphas.extend(self.block2.alphas())
+        alphas.extend(self.block3.alphas())
+        return alphas
 
     def forward(self, x):
         out = self.conv1(x)
