@@ -15,7 +15,7 @@ from models import L0WideResNet, find_l0_modules
 from dataloaders import cifar10, cifar100
 from utils import save_checkpoint, AverageMeter, accuracy
 from torch.optim import lr_scheduler
-from neuro.neurometer import LatencyWatch
+# from neuro.neurometer import LatencyWatch
 
 
 parser = argparse.ArgumentParser(description='PyTorch WideResNet Training')

@@ -18,8 +18,8 @@ floatTensor = torch.FloatTensor if not torch.cuda.is_available() else torch.cuda
 
 
 def config_filename(height, width, kernel_size, padding, stride, cuda):
-    str_ = f"{height}-{width}-{kernel_size}-{padding}-{stride}-{cuda}.dat"
-    return str_
+    # str_ = f"{height}-{width}-{kernel_size}-{padding}-{stride}-{cuda}.dat"
+    return ""
 
 class LatencyTable(nn.Module):
 

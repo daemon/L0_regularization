@@ -162,7 +162,7 @@ def find_wrn_table(in_planes, stride):
     for idx, p in enumerate(planes):
         if in_planes <= p:
             break
-    return f"wrn{idx + 1}_st{stride}.csv"
+    return "" # f"wrn{idx + 1}_st{stride}.csv"
 
 
 class BasicBlock(nn.Module):

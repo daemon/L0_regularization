@@ -105,4 +105,4 @@ def save_checkpoint(state, is_best, name, filename='checkpoint.pth.tar', epoch=0
     if is_best:
         shutil.copyfile(filename, 'runs/%s/' % name + 'model_best.pth.tar')
     if epoch in (179, 189):
-        shutil.copyfile(filename, 'runs/%s/' % name + f'model_{epoch}.pth.tar')
+        shutil.copyfile(filename, 'runs/%s/' % name + 'model_{}.pth.tar'.format(epoch))
