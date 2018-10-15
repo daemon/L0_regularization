@@ -235,7 +235,7 @@ def main():
         model.init_beta_ema(args.beta_ema)
         if args.finetune:
             args.lr = 0.0008
-            args.epochs += 50
+            args.epochs += 1
             # parameters = []
             model.freeze(args.finetune_dropout)
             model.prune()
@@ -276,7 +276,7 @@ def main():
             if args.finetune:
                 args.lr = args.lr * 0.2 * 0.2 * 0.2
                 optimizer = torch.optim.SGD(parameters, args.lr, momentum=args.momentum, nesterov=True)#, weight_decay=args.weight_decay)
-                args.epochs += 50
+                args.epochs += 1
                 # parameters = []
                 model.freeze(args.finetune_dropout)
                 model.prune()

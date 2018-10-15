@@ -35,4 +35,33 @@
 # python train_wide_resnet.py --resume_boiled wrn_boiled_cuda.pt --lat_lambda 0 --lamba 0 --lr 0.0008 --finetune > cuda_boiling_log_wrn2
 
 
-python train_wide_resnet.py --flops_lambda 3E-3 --target_flops 4000 --lamba 0 --name wrn-flopslamb1E-4
+# python train_wide_resnet.py --flops_lambda 3E-3 --target_flops 4000 --lamba 0 --name wrn-flopslamb1E-4 > flops_log
+# python train_wide_resnet.py --flops_lambda 0 --target_flops 4000 --lamba 0 --name wrn-flopslamb1E-4 --resume runs/wrn-flopslamb1E-4_28_10/checkpoint.pth.tar --finetune > flops_log-finetune
+
+# python train_wide_resnet.py --flops_lambda 3E-3 --target_flops 4000 --lamba 0 --name wrn-flopslamb1E-4 --dataset c100 > flops_log-c100
+# python train_wide_resnet.py --flops_lambda 0 --target_flops 4000 --lamba 0 --name wrn-flopslamb1E-4 --dataset c100 --resume runs/wrn-flopslamb1E-4_28_10_c100/model_189.pth.tar --finetune > flops_log-finetune-c100
+# python train_wide_resnet.py --flops_lambda 0 --target_flops 4000 --lamba 0 --name wrn-flopslamb1E-4 --dataset c100 --resume runs/wrn-flopslamb1E-4_28_10_c100/checkpoint.pth.tar --finetune > flops_log-finetune-c100
+
+# python train_wide_resnet.py --flops_lambda 3E-3 --target_flops 2500 --lamba 0 --name wrn-flopslamb1E-425k > flops_log-2.5k
+# python train_wide_resnet.py --flops_lambda 0 --target_flops 2500 --lamba 0 --name wrn-flopslamb1E-425k --resume runs/wrn-flopslamb1E-425k_28_10/checkpoint.pth.tar --finetune > flops_log-2.5k-finetune
+# python train_wide_resnet.py --flops_lambda 0 --target_flops 2500 --lamba 0 --name wrn-flopslamb1E-425k --resume runs/wrn-flopslamb1E-425k_28_10/model_189.pth.tar --finetune > flops_log-2.5k-finetune
+# python train_wide_resnet.py --flops_lambda 0 --target_flops 2500 --lamba 0 --name wrn-flopslamb1E-425k --compute_flops --resume runs/wrn-flopslamb1E-425k_28_10/model_189.pth.tar --finetune > flops_log-2.5k-finetune
+
+
+
+# python train_wide_resnet.py --flops_lambda 3E-3 --target_flops 2500 --lamba 0 --name wrn-flopslamb1E-4-2.5k --dataset c100 > flops_log-c100-2.5k
+# python train_wide_resnet.py --flops_lambda 0 --target_flops 2500 --lamba 0 --name wrn-flopslamb1E-4-2.5k --dataset c100 --resume runs/wrn-flopslamb1E-4_28_10_c100/model_189.pth.tar --finetune > flops_log-finetune-c100-2.5k
+
+
+# python train_wide_resnet.py --flops_lambda 3E-3 --target_flops 2500 --lamba 0 --name wrn-flopslamb1E-425k > flops_log-2.5k-2
+# # python train_wide_resnet.py --flops_lambda 0 --target_flops 2500 --lamba 0 --name wrn-flopslamb1E-425k --resume runs/wrn-flopslamb1E-425k_28_10/checkpoint.pth.tar --finetune > flops_log-2.5k-finetune
+# python train_wide_resnet.py --flops_lambda 0 --target_flops 2500 --lamba 0 --name wrn-flopslamb1E-425k --resume runs/wrn-flopslamb1E-425k_28_10/model_189.pth.tar --finetune > flops_log-2.5k-finetune-2
+
+
+# python train_wide_resnet.py --flops_lambda 3E-3 --target_flops 2500 --lamba 0 --name wrn-flopslamb1E-425k > flops_log-2.5k-3
+# python train_wide_resnet.py --flops_lambda 0 --target_flops 2500 --lamba 0 --name wrn-flopslamb1E-425k --resume runs/wrn-flopslamb1E-425k_28_10/checkpoint.pth.tar --finetune > flops_log-2.5k-finetune
+# python train_wide_resnet.py --flops_lambda 0 --target_flops 2500 --lamba 0 --name wrn-flopslamb1E-425k --resume runs/wrn-flopslamb1E-425k_28_10/model_189.pth.tar --finetune > flops_log-2.5k-finetune-3
+
+# python train_wide_resnet.py --flops_lambda 3E-3 --target_flops 2500 --lamba 0 --name wrn-flopslamb1E-425k > flops_log-2.5k-4
+# python train_wide_resnet.py --flops_lambda 0 --target_flops 2500 --lamba 0 --name wrn-flopslamb1E-425k --resume runs/wrn-flopslamb1E-425k_28_10/checkpoint.pth.tar --finetune > flops_log-2.5k-finetune
+# python train_wide_resnet.py --flops_lambda 0 --target_flops 2500 --lamba 0 --name wrn-flopslamb1E-425k --resume runs/wrn-flopslamb1E-425k_28_10/model_189.pth.tar --finetune > flops_log-2.5k-finetune-4
